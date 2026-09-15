@@ -164,13 +164,14 @@ export class FlowStreamClient {
 
     /** Stops the client for good, for a failure that retrying cannot fix. Every terminal path goes
      * through here rather than just clearing `running`: the batch timer is an interval, so a path
-     * that forgets to stop it leaves it firing for the life of the page. Unlike stop(), this does
-     * not flush or fire onDisconnected - the caller does that, since the ordering differs by
-     * path. */
+     * that forgets to stop it leaves it firing for the life of the page. This does flush, so
+     * flows already received before the terminal failure still reach onFlows; unlike stop(), it
+     * does not fire onDisconnected - the caller does that, since the ordering differs by path. */
     private haltPermanently(): void {
         this.running = false;
         this.stopBatchTimer();
         if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+        this.flushBatch();
     }
 
     /** Parses the backend's error payload out of a non-OK response, or returns null if the body is
@@ -278,14 +279,23 @@ export class FlowStreamClient {
             if (!block.trim()) continue;
             let eventType = 'message';
             let data = '';
+            let isComment = false;
             for (const line of block.split('\n')) {
-                if (line.startsWith('event:')) { eventType = line.slice(6).trim(); }
+                if (line.startsWith(':')) { isComment = true; }
+                else if (line.startsWith('event:')) { eventType = line.slice(6).trim(); }
                 else if (line.startsWith('data:')) {
                     const value = line.startsWith('data: ') ? line.slice(6) : line.slice(5);
                     data += (data ? '\n' : '') + value;
                 }
             }
             if (data) events.push({ type: eventType, data });
+            // The backend's keepalive comment (": keepalive\n\n") carries no data: line, so it
+            // would otherwise be silently dropped here. Surface it as its own event so
+            // handleSSEEvent can treat it as proof the connection is alive - a filter that
+            // matches nothing can otherwise go a full maxReconnectAttempts cycles without ever
+            // resetting reconnectAttempts, tripping "Max reconnect attempts reached" on a
+            // connection that never actually failed.
+            else if (isComment) events.push({ type: 'comment', data: '' });
         }
         return { parsed: events, remaining };
     }
@@ -298,11 +308,15 @@ export class FlowStreamClient {
                     // Reset here, not on the 200 that opens the connection: the backend can
                     // return 200 and then fail immediately via an "error" event (see below), so
                     // resetting on the 200 alone made every failure retry at a flat 1s delay
-                    // forever instead of backing off. Actual data flowing is the real signal that
-                    // the connection is healthy.
+                    // forever instead of backing off. Flows are one signal that the connection is
+                    // healthy, but not the only one - a narrow filter can leave the FA ring buffer
+                    // empty for a long time without anything being wrong, which is why the
+                    // "comment" case below (the backend's periodic keepalive) resets this too.
                     this.reconnectAttempts = 0;
                     this.batchBuffer.push(...payload.flows);
                 }
+            } else if (event.type === 'comment') {
+                this.reconnectAttempts = 0;
             } else if (event.type === 'dropped') {
                 const payload = JSON.parse(event.data) as SSEDroppedEvent;
                 this.reconnectAttempts = 0;

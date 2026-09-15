@@ -194,8 +194,11 @@ it*, using a coarse cluster-admin check; it does not make the data per-user.
 This describes FA as antrea-ui's `pkg/flowpb` bindings model it; FA on Antrea
 `main` has since added its own per-request authorization (requiring a
 `cluster_wide`/`namespaces` scope on every `GetFlowsRequest`, and a
-`SubjectAccessReview` against the caller's credential), which this backend does
-not yet speak - tracked separately from the authentication work this PR covers.
+`SubjectAccessReview` against the caller's credential). This backend does not
+yet send that scope, and the `antrea-ui-admin` ServiceAccount this backend
+authenticates as has no `list`/`watch` grant on `flows.observability.antrea.io`
+in `role.yaml` - so a cluster running that FA version will reject every
+request from this backend until both are added.
 
 **Interim restriction.** Because there is no per-user answer to fall back on,
 the endpoint is currently limited to two kinds of caller:

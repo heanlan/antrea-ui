@@ -115,17 +115,19 @@ func (c Credential) MarshalJSON() ([]byte, error) {
 // slice, an escaped string conversion). It still bounds how long the material stays trivially
 // recoverable from the process heap after logout or expiry.
 //
-// One known, permanent exception: a KindBearer credential's cached transport
-// (pkg/k8s.ClientFactory.TransportFor) holds the token as a client-go bearerAuthRoundTripper,
-// which stores it as an immutable Go string set once at construction. That copy cannot be
-// scrubbed by this method, or by anything else — the field is private to client-go and strings
-// cannot be mutated in place. Dropping the session's reference to that transport (see
-// dropTransportsLocked) only makes the copy eligible for garbage collection; unlike every other
-// field here, it is not actively erased the instant the session ends, and Go's GC gives no
-// timing guarantee and does not zero reclaimed memory. Avoidable only by not using client-go's
-// string-based bearer round-tripper helper, which was deliberately not done here to avoid
-// drifting from client-go's own transport handling (see the cert-transport case below for the
-// same reasoning cutting the other way).
+// Two known, permanent exceptions to "actively erased the instant the session ends". First, every
+// call to Session.Credential() hands out a clone() so the caller can read it after this session's
+// own copy is zeroed or overwritten concurrently (e.g. by the flow-stream hot path); that clone is
+// untouched by this method and is erased only when Go's GC reclaims it, on no fixed schedule.
+// Second, a KindBearer credential's cached transport (pkg/k8s.ClientFactory.TransportFor) holds
+// the token as a client-go bearerAuthRoundTripper, which stores it as an immutable Go string set
+// once at construction. That copy cannot be scrubbed by this method, or by anything else — the
+// field is private to client-go and strings cannot be mutated in place. Dropping the session's
+// reference to that transport (see dropTransportsLocked) only makes the copy eligible for garbage
+// collection, same as the clone case above, and Go's GC gives no timing guarantee and does not
+// zero reclaimed memory. Avoidable only by not using client-go's string-based bearer round-tripper
+// helper, which was deliberately not done here to avoid drifting from client-go's own transport
+// handling (see the cert-transport case below for the same reasoning cutting the other way).
 func (c *Credential) Zero() {
 	zeroBytes(c.Token)
 	zeroBytes(c.CertPEM)
