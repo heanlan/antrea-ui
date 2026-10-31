@@ -4335,3 +4335,155 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         restart.mockRestore();
     });
 });
+
+describe('AntreaFlowVisibilityPage — namespace aggregation', () => {
+    interface AggregateState {
+        _entries: FlowEntry[];
+        _clusterWide: boolean;
+        _edgeLimit: number;
+        _busiestEdges: Set<string>;
+        _selectedEdgeKey: string | null;
+        _expandedNamespaces: Set<string>;
+        _simulation: d3.Simulation<PositionedNode, undefined>;
+        _graphRef: {
+            nodes: { id: string; kind: string; internal?: { connections: number; denied: number; bytes: number } }[];
+            edges: { source: string; target: string; connectionCount: number; totalBytesForward: number; totalBytesReverse: number; protoPorts: Map<number, Set<number>>; ingressPolicyNames: Set<string> }[];
+        };
+        _toggleNamespace(ns: string): void;
+        _buildServiceMap(): void;
+    }
+    async function aggregate(flows: Flow[]) {
+        const page = await mount(async () => sseResponse([]));
+        await vi.advanceTimersByTimeAsync(0);
+        const state = page as unknown as AggregateState;
+        state._clusterWide = true;
+        page.viewMode = 'map';
+        await page.updateComplete;
+        const store = new FlowStore();
+        store.upsertBatch(flows);
+        state._entries = store.getAll();
+        await page.updateComplete;
+        return { page, state };
+    }
+
+    test('folds namespaces, sums directed edges, unions policies and ports, and retains worst verdict', async () => {
+        const { page, state } = await aggregate([
+            makeFlow({ srcNs: 'a', dstNs: 'b', ingressPolicy: 'allow' }),
+            makeFlow({ srcNs: 'a', dstNs: 'b', srcPod: 'other-abc12', dstPort: 443,
+                destService: 'b/web:https', ingressPolicy: 'deny', ingressAction: NetworkPolicyRuleAction.Drop }),
+            makeFlow({ srcNs: 'b', dstNs: 'a', srcIP: '10.0.0.3' }),
+        ]);
+        expect(page.shadowRoot!.querySelector<HTMLSelectElement>('select[aria-label="Busiest edges"]')!.value).toBe('50');
+        expect(state._graphRef.nodes.map(n => n.id).sort()).toEqual(['namespace:a', 'namespace:b']);
+        const forward = state._graphRef.edges.find(e => e.source === 'namespace:a')!;
+        expect(forward).toMatchObject({ target: 'namespace:b', connectionCount: 2, totalBytesForward: 200, totalBytesReverse: 200 });
+        expect(forward.protoPorts.get(6)).toEqual(new Set([80, 443]));
+        expect(forward.ingressPolicyNames).toEqual(new Set(['allow', 'deny']));
+        expect(page.shadowRoot!.querySelector('.edges path')!.getAttribute('marker-end')).toBe('url(#arrowhead-drop)');
+    });
+
+    test('summarizes internal drops including same-workload traffic once, without self-loops', async () => {
+        const { page, state } = await aggregate([
+            makeFlow({ srcNs: 'a', dstNs: 'a' }),
+            makeFlow({ srcNs: 'a', dstNs: 'a', dstPod: 'client-abc12', dstPort: 81,
+                ingressAction: NetworkPolicyRuleAction.Reject }),
+        ]);
+        expect(state._graphRef.nodes).toHaveLength(1);
+        expect(state._graphRef.nodes[0].internal).toEqual({ connections: 2, denied: 1, bytes: 400 });
+        expect(state._graphRef.edges).toHaveLength(0);
+        expect(page.shadowRoot!.querySelector('.nodes')!.textContent).toContain('2 internal · 1 denied');
+    });
+
+    test('keeps redacted and external endpoints distinct and never expands them', async () => {
+        const { page, state } = await aggregate([
+            makeFlow({ srcNs: 'a', dstNs: 'b' }),
+            makeFlow({ srcNs: 'a', dstNs: 'b', dstPort: 81, dstDisclosure: EndpointDisclosure.Flow }),
+            makeFlow({ srcNs: 'a', dstNs: '', dstPort: 82, dstDisclosure: EndpointDisclosure.Flow }),
+            makeFlow({ srcNs: 'a', dstNs: '', dstPort: 83, flowType: FlowType.ToExternal }),
+        ]);
+        expect(state._graphRef.nodes.map(n => n.kind).sort()).toEqual([
+            'external', 'namespace', 'namespace', 'undisclosed', 'undisclosedNamespace',
+        ]);
+        const redacted = Array.from(page.shadowRoot!.querySelectorAll<SVGGElement>('.nodes .node'))
+            .find(el => (d3.select(el).datum() as { kind: string }).kind === 'undisclosedNamespace')!;
+        redacted.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await page.updateComplete;
+        expect(state._expandedNamespaces.size).toBe(0);
+        state._toggleNamespace('b');
+        await page.updateComplete;
+        expect(state._graphRef.nodes.some(n => n.id === 'undisclosed-namespace:b')).toBe(true);
+        expect(state._graphRef.nodes.some(n => n.id === 'b/server')).toBe(true);
+    });
+
+    test('publishes endpoint kinds and clears folded selection on expansion', async () => {
+        const { page, state } = await aggregate([makeFlow({ srcNs: 'a', dstNs: 'b' })]);
+        const selected = vi.fn();
+        page.addEventListener('antrea-edge-selected', selected);
+        page.shadowRoot!.querySelector('.edges path')!.dispatchEvent(new MouseEvent('click'));
+        await page.updateComplete;
+        expect(selected.mock.calls.at(-1)![0].detail).toMatchObject({ source: 'namespace:a', sourceKind: 'namespace', targetKind: 'namespace' });
+        state._toggleNamespace('a');
+        await page.updateComplete;
+        await page.updateComplete;
+        expect(state._selectedEdgeKey).toBeNull();
+        expect(selected.mock.calls.at(-1)![0].detail).toBeNull();
+    });
+
+    test('hover and pin expose omitted edges without changing positions, zoom, or layout links', async () => {
+        const { page, state } = await aggregate([
+            makeFlow({ srcNs: 'a', dstNs: 'b' }),
+            makeFlow({ srcNs: 'a', dstNs: 'c', dstPort: 81 }),
+            makeFlow({ srcNs: 'c', dstNs: 'd', dstPort: 82 }),
+        ]);
+        state._edgeLimit = 1;
+        state._busiestEdges.clear();
+        await page.updateComplete;
+        const simulation = state._simulation.stop().alpha(0);
+        const restart = vi.spyOn(simulation, 'restart');
+        const positions = simulation.nodes().map(n => [n.x, n.y]);
+        const root = page.shadowRoot!;
+        const a = Array.from(root.querySelectorAll<SVGGElement>('.nodes .node'))
+            .find(el => (d3.select(el).datum() as PositionedNode).id === 'namespace:a')!;
+        expect(root.querySelectorAll('.edges path')).toHaveLength(1);
+        a.dispatchEvent(new MouseEvent('mouseenter'));
+        expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+        a.querySelector('.edge-pin')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        a.dispatchEvent(new MouseEvent('mouseleave'));
+        expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+        expect((simulation.force('link') as d3.ForceLink<PositionedNode, d3.SimulationLinkDatum<PositionedNode>>).links()).toHaveLength(1);
+        expect(simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
+        expect(restart).not.toHaveBeenCalled();
+        a.querySelector('.edge-pin')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        expect(root.querySelectorAll('.edges path')).toHaveLength(1);
+        state._toggleNamespace('a');
+        await page.updateComplete;
+        expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+    });
+});
+
+
+test('single-namespace maps keep workloads while limiting edges and retaining selection', async () => {
+    const page = await mount(async () => sseResponse([]));
+    await vi.advanceTimersByTimeAsync(0);
+    page.viewMode = 'map';
+    await page.updateComplete;
+    const state = page as unknown as {
+        _entries: FlowEntry[]; _edgeLimit: number; _selectedEdgeKey: string | null;
+        _graphRef: { nodes: { kind: string }[] };
+    };
+    const store = new FlowStore();
+    store.upsertBatch([
+        makeFlow({ dstPod: 'aaa-abc12' }), makeFlow({ dstPod: 'zzz-abc12', dstPort: 81 }),
+    ]);
+    state._entries = store.getAll();
+    state._edgeLimit = 1;
+    await page.updateComplete;
+    expect(state._graphRef.nodes.every(n => n.kind === 'workload')).toBe(true);
+    expect(page.shadowRoot!.querySelectorAll('.edges path')).toHaveLength(1);
+    state._selectedEdgeKey = 'default/client|default/zzz';
+    await page.updateComplete;
+    expect(page.shadowRoot!.querySelectorAll('.edges path')).toHaveLength(2);
+    state._selectedEdgeKey = null;
+    await page.updateComplete;
+    expect(page.shadowRoot!.querySelectorAll('.edges path')).toHaveLength(1);
+});
