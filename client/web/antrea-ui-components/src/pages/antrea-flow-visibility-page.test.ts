@@ -3614,6 +3614,9 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         expect(node.getAttribute('transform')).toBe(`translate(${dragged.x},${dragged.y})`);
         expect(restart).not.toHaveBeenCalled();
         restart.mockRestore();
+        // D3 suppresses the click following a drag until its zero-delay timer fires.
+        // Drain it before restoring real timers so later tests can click normally.
+        await vi.advanceTimersByTimeAsync(0);
     });
 
     test('recreates a removed SVG on returning from list view using retained positions', async () => {
