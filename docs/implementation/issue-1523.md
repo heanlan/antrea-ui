@@ -25,7 +25,9 @@ and normalize namespace centroids once.
   nodes from the active simulation.
 - Join SVG nodes, edges, edge labels, and namespace hulls by stable identifiers.
   Keep the content group and restore its transform from D3's current zoom state
-  on each update.
+  on each update. Retain the transform on the page as well, so switching to the
+  list and back restores both the new SVG's content and its interactive D3 zoom
+  state.
 - Treat edge-only changes, metadata changes, node removal, and resize as redraws
   without reheating. Update widths, verdict colors, arrowheads, labels, and
   bidirectional curves from current data.
@@ -59,16 +61,25 @@ namespace nodes. Incremental force updates clear stale link and anchor
 initializers before adding nodes, avoiding references to removed nodes or
 missing anchor targets.
 
+## Viewport preservation
+
+List view removes the SVG, including D3's per-element zoom state. Previously,
+returning to the map restored node positions but reset the viewport to identity.
+Keep the current transform independently of the SVG and restore it when the new
+SVG is created. Streaming updates and resizing retain the current transform.
+
 ## Validation
 
-- Existing flow-page suite and new layout/page regression tests pass: 141 tests
+- Existing flow-page suite and new layout/page regression tests pass: 209 tests
   across 2 files.
 - Regression coverage includes edge appearance/disappearance, resize, node and
   DOM identity, preserved zoom, updated verdicts and label widths, no label
   measurements during ticks, successive node additions, fixed existing
   positions, empty graph recovery, map/list switching, and namespace centroid
   symmetry independent of iteration order.
-- Full component suite passes: 499 tests across 20 files.
+- The viewport regression verifies that List-to-Map restores D3's interactive
+  zoom state and that the next wheel gesture continues from it.
+- Full component suite passes: 632 tests across 21 files.
 - Component TypeScript check (`tsc --noEmit`) passes.
 - ESLint on all changed TypeScript files passes with zero warnings.
 - Component production build (`vite build`) passes. Vite reports the existing

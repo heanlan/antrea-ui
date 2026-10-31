@@ -3494,6 +3494,7 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         _entries: FlowEntry[];
         _svgWidth: number;
         _simulation: d3.Simulation<PositionedNode, undefined>;
+        _mapZoom: d3.ZoomBehavior<SVGSVGElement, unknown>;
         _buildServiceMap(): void;
     }
 
@@ -3619,11 +3620,14 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         await vi.advanceTimersByTimeAsync(0);
     });
 
-    test('recreates a removed SVG on returning from list view using retained positions', async () => {
+    test('returning from list view restores node positions and the interactive zoom viewport', async () => {
         const { page, state } = await mountMap();
         await update(page, state, [makeFlow()]);
         state._simulation.stop().tick(300);
         const positions = state._simulation.nodes().map(n => [n.x, n.y]);
+        const svg = page.shadowRoot!.querySelector<SVGSVGElement>('#graph-svg')!;
+        const transform = d3.zoomIdentity.translate(-185, 72).scale(1.8);
+        d3.select(svg).call(state._mapZoom.transform, transform);
         page.viewMode = 'list';
         await page.updateComplete;
         page.viewMode = 'map';
@@ -3631,5 +3635,12 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         expect(page.shadowRoot!.querySelectorAll('.node')).toHaveLength(2);
         expect(page.shadowRoot!.querySelector('.edges path')!.getAttribute('d')).toMatch(/^M/);
         expect(state._simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
+        const restored = page.shadowRoot!.querySelector<SVGSVGElement>('#graph-svg')!;
+        expect(restored).not.toBe(svg);
+        expect(d3.zoomTransform(restored)).toEqual(transform);
+        expect(restored.querySelector('.map-content')!.getAttribute('transform')).toBe(transform.toString());
+        // The visible transform and D3's internal state must agree for the next wheel gesture.
+        d3.select(restored).call(state._mapZoom.scaleBy, 1.1);
+        expect(d3.zoomTransform(restored).k).toBeCloseTo(1.98);
     });
 });

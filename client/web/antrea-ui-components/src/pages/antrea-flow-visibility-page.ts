@@ -989,6 +989,10 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
     private _store = new FlowStore();
     private _client: FlowStreamClient | null = null;
     private _simulation: d3.Simulation<D3Node, D3Link> | null = null;
+    // The SVG is recreated when returning from the list. Retain the user's viewport here,
+    // independently of D3's per-element __zoom state and the simulation's node positions.
+    private _mapTransform = d3.zoomIdentity;
+    private _mapZoom: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
     // The key of the request the open stream was built from, or '' when there is none. Compared
     // against itself to decide whether a change actually needs a reconnect.
     private _filterKey = '';
@@ -1558,11 +1562,19 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             };
         });
 
+        const newViewport = d3svg.select('g.map-content').empty();
+        const transform = newViewport ? this._mapTransform : d3.zoomTransform(svg);
         const container = d3svg.selectAll<SVGGElement, null>('g.map-content').data([null]).join('g')
-            .attr('class', 'map-content').attr('transform', d3.zoomTransform(svg).toString());
-        const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.3, 3])
-            .on('zoom', event => container.attr('transform', event.transform));
+            .attr('class', 'map-content').attr('transform', transform.toString());
+        const zoom = this._mapZoom ?? d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.3, 3]);
+        zoom.extent([[0, 0], [this._svgWidth, HEIGHT]])
+            .on('zoom', event => {
+                this._mapTransform = event.transform;
+                container.attr('transform', event.transform);
+            });
+        this._mapZoom = zoom;
         d3svg.call(zoom);
+        if (newViewport) d3svg.call(zoom.transform, transform);
 
         // Namespace hulls
         const nsMap = new Map<string, D3Node[]>();
