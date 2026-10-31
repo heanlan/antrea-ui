@@ -24,8 +24,10 @@ and bit rates sum; ports, policies, and flow types union. Existing worst-verdict
 coloring therefore continues to apply. Internal connections are counted directly
 from the visible FlowStore entries before the self-edge check, including traffic
 between Pods of the same workload. Each internal connection contributes once.
-Folded nodes show internal and denied counts, with byte totals in their tooltip;
-no self-loop is drawn.
+Folded nodes show internal and denied counts, with byte totals in their tooltip.
+Internal denials color the summary and outline red. Identified Namespace titles
+use the standard readable node text color, while withheld nodes retain their style.
+No self-loop is drawn.
 
 External, undisclosed, and undisclosed-Namespace endpoints keep their established
 identities. They never expand or merge with a disclosed Namespace, even if the
@@ -34,7 +36,9 @@ Only endpoints already identified by the existing disclosure logic can fold.
 
 A separate helper chooses the busiest 50 directed edges by connection count,
 with controls for 25, 50, 100, 200, or all, in every scope. Ties use stable endpoint
-keys. A challenger replaces the weakest retained edge only when its count is
+keys. The themed selector and reactive shown/total edge count make the limit
+visible, with explanatory text that exploration exceptions can exceed it. A
+challenger replaces the weakest retained edge only when its count is
 strictly greater than 120% of that edge's count. Scope or filter changes reset
 ranking and exploration state; changing the limit reranks immediately.
 

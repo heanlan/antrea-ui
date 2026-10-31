@@ -4392,6 +4392,11 @@ describe('AntreaFlowVisibilityPage — namespace aggregation', () => {
         expect(state._graphRef.nodes[0].internal).toEqual({ connections: 2, denied: 1, bytes: 400 });
         expect(state._graphRef.edges).toHaveLength(0);
         expect(page.shadowRoot!.querySelector('.nodes')!.textContent).toContain('2 internal · 1 denied');
+        const node = page.shadowRoot!.querySelector('.nodes .node')!;
+        expect((node.querySelector('rect') as SVGElement).style.stroke).toContain('--antrea-color-edge-drop');
+        const labels = node.querySelectorAll('text');
+        expect((labels[0] as SVGElement).style.fill).toContain('--antrea-color-map-node-text');
+        expect((labels[1] as SVGElement).style.fill).toContain('--antrea-color-edge-drop');
     });
 
     test('keeps redacted and external endpoints distinct and never expands them', async () => {
@@ -4442,19 +4447,34 @@ describe('AntreaFlowVisibilityPage — namespace aggregation', () => {
         const restart = vi.spyOn(simulation, 'restart');
         const positions = simulation.nodes().map(n => [n.x, n.y]);
         const root = page.shadowRoot!;
+        const count = async () => {
+            await page.updateComplete;
+            return root.querySelector('.map-edge-count')!.textContent;
+        };
+        expect(await count()).toBe('1 of 3 edges');
+        expect(root.querySelector('select[aria-label="Busiest edges"]')!.classList.contains('field-select')).toBe(true);
         const a = Array.from(root.querySelectorAll<SVGGElement>('.nodes .node'))
             .find(el => (d3.select(el).datum() as PositionedNode).id === 'namespace:a')!;
         expect(root.querySelectorAll('.edges path')).toHaveLength(1);
         a.dispatchEvent(new MouseEvent('mouseenter'));
         expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+        expect(await count()).toBe('2 of 3 edges');
         a.querySelector('.edge-pin')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         a.dispatchEvent(new MouseEvent('mouseleave'));
         expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+        expect(await count()).toBe('2 of 3 edges');
         expect((simulation.force('link') as d3.ForceLink<PositionedNode, d3.SimulationLinkDatum<PositionedNode>>).links()).toHaveLength(1);
         expect(simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
         expect(restart).not.toHaveBeenCalled();
         a.querySelector('.edge-pin')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
         expect(root.querySelectorAll('.edges path')).toHaveLength(1);
+        expect(await count()).toBe('1 of 3 edges');
+        state._edgeLimit = 0;
+        await page.updateComplete;
+        expect(await count()).toBe('3 of 3 edges');
+        state._edgeLimit = 1;
+        await page.updateComplete;
+        expect(await count()).toBe('1 of 3 edges');
         state._toggleNamespace('a');
         await page.updateComplete;
         expect(root.querySelectorAll('.edges path')).toHaveLength(2);

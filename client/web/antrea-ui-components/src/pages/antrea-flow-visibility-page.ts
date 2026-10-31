@@ -612,7 +612,7 @@ function edgeLabel(edge: WorkloadEdge): string {
 
 // ── D3 node geometry ─────────────────────────────────────────────────────────
 
-export interface D3Node extends d3.SimulationNodeDatum { userPinned?: boolean; id: string; shortName: string; namespace: string; kind: NodeKind; detail: string; serviceOnly: boolean; }
+export interface D3Node extends d3.SimulationNodeDatum { internal?: WorkloadNode['internal']; userPinned?: boolean; id: string; shortName: string; namespace: string; kind: NodeKind; detail: string; serviceOnly: boolean; }
 
 /** Whether this node is drawn as a diamond: an aggregate of unbounded cardinality with no
  * namespace, excluded from the hulls and not drillable. `undisclosed` reuses External's shape
@@ -1027,6 +1027,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
     @state() private _svgWidth = 1100;
     @state() private _selectedEdgeKey: string | null = null;
     @state() private _edgeLimit = 50;
+    @state() private _shownEdgeCount = 0;
+    @state() private _totalEdgeCount = 0;
     @state() private _expandedNamespaces = new Set<string>();
     private _busiestEdges = new Set<string>();
     private _pinnedNodes = new Set<string>();
@@ -1700,6 +1702,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             || e.source === this._hoveredNode || e.target === this._hoveredNode
             || this._pinnedNodes.has(e.source) || this._pinnedNodes.has(e.target)
             || `${e.source}|${e.target}` === this._selectedEdgeKey);
+        this._shownEdgeCount = shownEdges.length;
+        this._totalEdgeCount = graph.edges.length;
         this._graphRef = graph;
         if (this._hoveredNode && !graph.nodeMap.has(this._hoveredNode)) this._hoveredNode = null;
         for (const id of this._pinnedNodes) if (!graph.nodeMap.has(id)) this._pinnedNodes.delete(id);
@@ -1935,15 +1939,18 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             if (d.kind === 'undisclosedNamespace' || d.kind === 'namespace') {
                 // Both folded and withheld namespaces use the hull style. The lock marks
                 // withheld contents; identified namespaces can expand into a real hull.
+                const hasInternalDenials = d.kind === 'namespace' && (d.internal?.denied ?? 0) > 0;
                 g.append('rect').attr('x', -hw).attr('y', -hh).attr('width', hw * 2).attr('height', hh * 2)
                     .attr('rx', NODE_RX).attr('ry', NODE_RX)
-                    .style('fill', MAP_COLOR_VAR.nsHullFill).style('stroke', MAP_COLOR_VAR.nsHullStroke)
+                    .style('fill', MAP_COLOR_VAR.nsHullFill)
+                    .style('stroke', hasInternalDenials ? EDGE_COLOR_VAR.drop : MAP_COLOR_VAR.nsHullStroke)
                     .attr('stroke-width', 1).attr('stroke-dasharray', '4,2');
                 g.append('text').text(d.shortName).attr('dy', -3).attr('x', d.kind === 'undisclosedNamespace' ? LOCK_SIZE / 2 + 3 : 0).attr('text-anchor', 'middle')
-                    .style('fill', MAP_COLOR_VAR.nsLabel).attr('font-size', '11px').attr('font-weight', '600');
+                    .style('fill', d.kind === 'namespace' ? MAP_COLOR_VAR.nodeText : MAP_COLOR_VAR.nsLabel)
+                    .attr('font-size', '11px').attr('font-weight', '600');
                 if (d.kind === 'undisclosedNamespace') appendLock(g, -textWidth(d.shortName, 11) / 2 - LOCK_SIZE / 2 + 3, -13, MAP_COLOR_VAR.nsLabel);
                 g.append('text').text(d.detail).attr('dy', 15).attr('text-anchor', 'middle')
-                    .style('fill', MAP_COLOR_VAR.nodeNamespaceText).attr('font-size', '9px');
+                    .style('fill', hasInternalDenials ? EDGE_COLOR_VAR.drop : MAP_COLOR_VAR.nodeNamespaceText).attr('font-size', '9px');
                 // Worth a tooltip because it is actionable: it can name the grant that would
                 // disclose this namespace. aria-label rather than an SVG <title> - the hover
                 // handler below draws the visible one in the same panel the edge tooltip uses,
@@ -2475,14 +2482,16 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
         return html`
             <div class="row" style="gap:12px;margin-bottom:8px">
                 <label>Busiest edges (connections)
-                    <select aria-label="Busiest edges" @change=${(event: Event) => {
+                    <select class="field-select" aria-label="Busiest edges" @change=${(event: Event) => {
                         this._busiestEdges.clear();
                         this._edgeLimit = Number((event.target as HTMLSelectElement).value);
                     }}>
                         ${[25, 50, 100, 200, 0].map(n => html`<option value=${n} .selected=${n === this._edgeLimit}>${n || 'All'}</option>`)}
                     </select>
                 </label>
-                <span>Hover or pin ↔ to show all connections.</span>
+                <span class="map-edge-count" role="status">${this._shownEdgeCount} of ${this._totalEdgeCount} edges</span>
+                <span>Hover or pin ↔ to show all of a node's edges. Expanded namespaces,
+                    hover, pins, and selection can exceed the limit.</span>
                 ${this._clusterWide ? html`<antrea-button @click=${() => {
                     this._hoveredNode = null; this._hideTooltip(); this._expandedNamespaces = new Set();
                 }}>
