@@ -427,7 +427,7 @@ lives inside `bundle.zip`:
 | `bundleSha256` | no* | Hex SHA-256 of the plugin's `bundle.zip` as delivered (64 characters, compared case-insensitively). Verified whenever present, and **required** when the backend is configured with a plugin signing key — it is what makes the signature over `manifest.json` cover the bundle too. See "Signature verification" above. |
 | `bundleSource` | no | `{"apiServer": {"path": "/apis/<group>/<version>"}}` or `{"http": {}}` (with the URL in the ConfigMap's `bundleURL` key) — where the backend downloads `bundle.zip` from, for a ConfigMap that ships no `bundle.zip` (see "Downloading the bundle" below). Requires `bundleSha256`. `http` can be turned off with `plugins.bundleSource.http.enabled`. Not supported for the plugin directory source. |
 | `supportBundle` | no | `{apiServer: {path}, maxConcurrent?}`: a source of diagnostics that Antrea UI collects into its support bundles, served through the Kubernetes apiserver (typically by an APIService). `path` must be exactly `/apis/<group>/<version>`; Antrea UI appends `/supportbundles` to it and implements the protocol described in [supportbundle.md](supportbundle.md#the-source-protocol). `maxConcurrent` caps how many of Antrea UI's collections may be outstanding against the source at once (0, the default, means no limit; set 1 for a source that can only hold one bundle at a time, e.g. one that uses the same bundle name every time): see [Concurrent collections](supportbundle.md#concurrent-collections). An invalid `path` or a negative `maxConcurrent` rejects the plugin; a `supportBundle` with no variant this backend recognizes only skips the source. The plugin must grant `antrea-ui-admin` access to it: see [Support bundle sources](#support-bundle-sources). |
-| `federation` | no | `{remoteEntry, routes: [{path, sidebarLabel, icon?, exposedModule, kind?}]}` — a [Native Federation](https://www.npmjs.com/package/@angular-architects/native-federation) remote (its own entry in `bundle.zip`, separate from `entry`) plus the whole-page routes/sidebar entries it serves, as data instead of registering them in code (see below). Antrea UI's own frontend has no module federation loader and ignores this field entirely (see `plugins.ts`); it's consumed by a separate, out-of-tree Angular-based host, which lazily loads a route's `exposedModule` out of `remoteEntry`, only once that route is actually visited. `kind` is `"component"` (the default) or `"routes"` — any other value is rejected, dropping the whole plugin (see below): `"component"` expects `exposedModule` to export a single page component; `"routes"` expects it to export a whole route tree the plugin owns end to end, letting it nest its own sub-paths and register its own route-level providers without the host knowing anything about them. Since a `"routes"` route owns every sub-path under its own `path`, no other route in the same manifest may fall under it (rejected the same way two routes with an identical `path` are); a route nested under it in a *different*, already-installed plugin's manifest is resolved the same way an identical `path` across plugins is (see below). |
+| `federation` | no | `{remoteEntry, routes: [{path, sidebarLabel, icon?, exposedModule, kind?, requires?}]}` — a [Native Federation](https://www.npmjs.com/package/@angular-architects/native-federation) remote (its own entry in `bundle.zip`, separate from `entry`) plus the whole-page routes/sidebar entries it serves, as data instead of registering them in code (see below). Antrea UI's own frontend has no module federation loader and ignores this field entirely (see `plugins.ts`); it's consumed by a separate, out-of-tree Angular-based host, which lazily loads a route's `exposedModule` out of `remoteEntry`, only once that route is actually visited. `kind` is `"component"` (the default) or `"routes"` — any other value is rejected, dropping the whole plugin (see below): `"component"` expects `exposedModule` to export a single page component; `"routes"` expects it to export a whole route tree the plugin owns end to end, letting it nest its own sub-paths and register its own route-level providers without the host knowing anything about them. Since a `"routes"` route owns every sub-path under its own `path`, no other route in the same manifest may fall under it (rejected the same way two routes with an identical `path` are); a route nested under it in a *different*, already-installed plugin's manifest is resolved the same way an identical `path` across plugins is (see below). |
 
 `bundle.zip`'s own internal layout is entirely up to the plugin — a flat set
 of files, or nested paths like `assets/logo.png` for anything referenced by
@@ -484,6 +484,10 @@ it:
 - `federation.routes` must be non-empty — a remote with nothing to mount is
   meaningless on its own.
 - Each route needs `path`, `sidebarLabel`, and `exposedModule`.
+- `requires`, if set, must be `{clusterAdmin?, resources?}` (see
+  [Permission gating](#permission-gating)), and every entry in `resources`
+  needs a `resource` and a `verb`. Anything else drops the plugin, so a typo
+  can't show a page meant for some users to everyone.
 - `path` may not be the root path (`/`) or fall under a path nginx proxies
   straight to the backend (currently `api`, `auth`, e.g. `/api/v1/foo` or
   `/authors`) — the former collides with the host's own home page, the
@@ -921,6 +925,80 @@ cluster admin wrote, which your ClusterRole does not aggregate into — so your
 plugin's pages will 403 for them until that admin grants the same permissions
 deliberately. Say so in your plugin's install instructions. See
 [authentication.md](authentication.md).
+
+### Permission gating
+
+A route, sidebar entry or Overview tab can carry `requires`, and the host hides
+it from users who don't meet it:
+
+```js
+const adminOnly = { clusterAdmin: true };
+registerRoute({ path: '/plugin/admin', tag: 'my-admin-page', requires: adminOnly });
+registerSidebarEntry({ label: 'Admin', path: '/plugin/admin', requires: adminOnly });
+
+// Every query must pass can() against the user's rules.
+registerLandingPageTab({
+    id: 'policies', label: 'Policies', tag: 'my-policies-tab',
+    requires: { resources: [{ group: 'crd.antrea.io', resource: 'clusternetworkpolicies', verb: 'list' }] },
+});
+```
+
+A manifest-declared route (`federation.routes[].requires`) takes the same
+shape.
+
+- `clusterAdmin: true` passes only for a user whose access summary reports
+  `clusterAdmin`. Every query in `resources` must pass `can()`, which treats an
+  unknown verdict (incomplete rules) as passing, the same as for the built-in
+  pages.
+- **Sidebar entries.** A user who doesn't meet a sidebar entry's
+  requirement doesn't see the entry. A sidebar entry also inherits the
+  `requires` of the route at its `path`, so gating the page hides its entry
+  too. A hidden top-level entry hides the entries nested under it.
+- **Routes.** A user who doesn't meet a route's requirement gets the host's
+  "You do not have permission to view this page." panel instead of the page.
+  The Angular host also skips loading the route's federation remote.
+- **Overview tabs.** A tab the user doesn't meet is left out. A `?tab=`
+  that names it falls back to the built-in tab.
+- **Before the access summary loads**, gated items stay hidden, so an
+  admin-only entry never flashes for other users.
+- **Malformed `requires`.** A malformed `requires` is logged, and the item
+  is hidden.
+- **Failed fetch.** If the summary fetch fails, gated items are shown, the
+  same as the built-in pages.
+
+This is a UI hint, not authorization: Kubernetes RBAC still authorizes every
+API call your plugin makes, so keep handling a 403.
+
+To hide parts of your own UI, use `access()` from `@antrea/ui-plugin-sdk`.
+It wraps `window.__antreaPluginHost.access`, which the host keeps in sync
+with the summary its own nav uses:
+
+```js
+import { access } from '@antrea/ui-plugin-sdk';
+
+// Call when the component mounts; call the returned function when it unmounts.
+function bindTraceflowButton(button) {
+  const a = access();
+  const query = { group: 'crd.antrea.io', resource: 'traceflows', verb: 'create' };
+  const update = () => { button.hidden = !a.loaded() || !a.can(query); };
+  update();
+  return a.subscribe(update);
+}
+```
+
+Never await `ready()` at the top level of a plugin entry module: the host
+waits for entry imports before mounting the application that loads permissions.
+Await it inside a component lifecycle callback, or use a subscription as above.
+
+It also provides:
+
+- `verdict()`, for the `allowed` / `unknown` / `denied` answer;
+- `isClusterAdmin()`;
+- `accessibleNamespaces()` (`null` means all Namespaces, or unknown);
+- `meets(requirement)`, which applies the same check as `requires`;
+- `forNamespace(namespace)`, for the user's rules within one Namespace.
+
+`access()` throws on a host too old to provide it.
 
 ## Extending an existing page
 

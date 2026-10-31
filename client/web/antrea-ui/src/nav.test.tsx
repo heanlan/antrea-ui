@@ -497,3 +497,55 @@ describe('NavTab — permission gating', () => {
         expect(document.querySelector('a[href="/overview"]')).toBeNull();
     });
 });
+
+describe('NavTab — plugin permission gating', () => {
+    const admin = (clusterAdmin: boolean) => ({ ...summaryAllowing(), clusterAdmin });
+    const ADMIN_ONLY = [{ clusterAdmin: true }];
+
+    test('hides an entry whose requirement the user does not meet', () => {
+        mockUseAccess.mockReturnValue({ summary: admin(false), loaded: true });
+        render(<NavTab pluginSidebarEntries={[
+            { label: 'Admin', path: '/admin', access: ADMIN_ONLY },
+            podCounterEntry,
+        ]} />, { wrapper: MemoryRouter });
+
+        expect(document.querySelector('a[href="/admin"]')).toBeNull();
+        expect(document.querySelector('a[href="/plugin/pod-counter"]')).not.toBeNull();
+    });
+
+    test('shows the entry to a user who meets it', () => {
+        mockUseAccess.mockReturnValue({ summary: admin(true), loaded: true });
+        render(<NavTab pluginSidebarEntries={[{ label: 'Admin', path: '/admin', access: ADMIN_ONLY }]} />, { wrapper: MemoryRouter });
+
+        expect(document.querySelector('a[href="/admin"]')).not.toBeNull();
+    });
+
+    test('keeps a gated entry hidden while access is still loading', () => {
+        mockUseAccess.mockReturnValue({ summary: null, loaded: false });
+        render(<NavTab pluginSidebarEntries={[{ label: 'Admin', path: '/admin', access: ADMIN_ONLY }]} />, { wrapper: MemoryRouter });
+
+        expect(document.querySelector('a[href="/admin"]')).toBeNull();
+    });
+
+    test('a hidden plugin parent hides the entries nested under it', () => {
+        mockUseAccess.mockReturnValue({ summary: admin(false), loaded: true });
+        render(<NavTab pluginSidebarEntries={[
+            { label: 'Admin', path: '/admin', access: ADMIN_ONLY },
+            { label: 'Admin Child', path: '/admin-child', parentPath: 'admin' },
+        ]} />, { wrapper: MemoryRouter });
+
+        expect(document.querySelector('a[href="/admin"]')).toBeNull();
+        expect(document.querySelector('a[href="/admin-child"]')).toBeNull();
+    });
+
+    test('a gated child of a built-in page is hidden, its siblings stay', () => {
+        mockUseAccess.mockReturnValue({ summary: admin(false), loaded: true });
+        render(<NavTab pluginSidebarEntries={[
+            { label: 'Settings Admin', path: '/settings-admin', parentPath: 'settings', access: ADMIN_ONLY },
+            { label: 'Settings Extra', path: '/settings-extra', parentPath: 'settings' },
+        ]} />, { wrapper: MemoryRouter });
+
+        expect(document.querySelector('a[href="/settings-admin"]')).toBeNull();
+        expect(document.querySelector('a[href="/settings-extra"]')).not.toBeNull();
+    });
+});

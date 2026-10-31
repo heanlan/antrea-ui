@@ -19,7 +19,7 @@ import { useLocation } from 'react-router';
 import { Link } from 'react-router';
 import '@antrea/ui-components';
 import { can, canViewSummary, canViewFlows, canViewOverview, GATE_TRACEFLOW_CREATE } from '@antrea/ui-components';
-import type { PluginSidebarEntry } from './plugins';
+import { allowsPluginItem, type PluginSidebarEntry } from './plugins';
 import { useAccess, useScopeUser } from './access';
 import { getLastScope, scopeSearch, subscribeLastScope } from './lastScope';
 
@@ -114,7 +114,7 @@ function renderPluginNavItem(entry: PluginSidebarEntry, pathname: string) {
     );
 }
 
-export default function NavTab({ pluginSidebarEntries }: { pluginSidebarEntries: PluginSidebarEntry[] }) {
+export default function NavTab({ pluginSidebarEntries: allPluginSidebarEntries }: { pluginSidebarEntries: PluginSidebarEntry[] }) {
     const { pathname, search } = useLocation();
     const user = useScopeUser();
     // Subscribed: a page sets it after the navigation has rendered, when it takes a scope from its URL.
@@ -127,6 +127,15 @@ export default function NavTab({ pluginSidebarEntries }: { pluginSidebarEntries:
     const showSummary = loaded && canViewSummary(summary);
     const showTraceflow = loaded && can(summary, GATE_TRACEFLOW_CREATE);
     const showFlows = loaded && canViewFlows(summary);
+
+    // Entries gated by `requires` (see plugins.ts) drop out for users who don't meet it. A hidden
+    // top-level plugin entry takes the entries nested under it along, unlike a gated built-in
+    // page below, whose children move to top level: a plugin's children are its own sub-pages.
+    const visibleEntries = allPluginSidebarEntries.filter((entry) => allowsPluginItem({ summary, loaded }, entry.access));
+    const visiblePaths = new Set(visibleEntries.map((entry) => stripLeadingSlash(entry.path)));
+    const pluginParents = new Set(allPluginSidebarEntries.filter((entry) => !entry.parentPath).map((entry) => stripLeadingSlash(entry.path)));
+    const pluginSidebarEntries = visibleEntries.filter((entry) =>
+        !entry.parentPath || !pluginParents.has(entry.parentPath) || visiblePaths.has(entry.parentPath));
 
     // Plugin entries with a parentPath (already resolved/normalized by plugins.ts's
     // resolveParentPaths — always a leading-slash-stripped path, whether that path belongs to a

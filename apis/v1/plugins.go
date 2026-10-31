@@ -14,6 +14,11 @@
 
 package v1
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // PluginManifest describes a frontend plugin discovered by the backend from a labeled ConfigMap
 // or a plugin directory (see pkg/plugins). Page extensions (edge details, flow table columns) are
 // always registered by the plugin's own code - the host needs an actual
@@ -138,4 +143,41 @@ type PluginRoute struct {
 	// owns, letting it nest its own sub-paths and register its own route-level providers without
 	// the host knowing anything about them.
 	Kind string `json:"kind,omitempty"`
+	// Requires, when set, makes a host hide this route and its sidebar entry from users who
+	// don't meet it, evaluated against their AccessSummary. It is a UI hint, not authorization:
+	// Kubernetes RBAC still authorizes every API call the plugin's page makes.
+	Requires *PluginAccessRequirement `json:"requires,omitempty"`
+}
+
+// PluginAccessRequirement mirrors PluginAccessRequirement in antrea-ui-plugin-sdk. Every
+// condition set must hold.
+type PluginAccessRequirement struct {
+	// ClusterAdmin limits the item to users whose AccessSummary reports ClusterAdmin.
+	ClusterAdmin bool `json:"clusterAdmin,omitempty"`
+	// Resources lists queries that must each pass can() against the user's rules. An unknown
+	// verdict (incomplete rules) counts as passing, the same as for the built-in pages.
+	Resources []PluginResourceQuery `json:"resources,omitempty"`
+}
+
+// UnmarshalJSON rejects unknown requirement and resource-query fields so a misspelled
+// permission cannot silently become an unrestricted route.
+func (r *PluginAccessRequirement) UnmarshalJSON(data []byte) error {
+	type requirement PluginAccessRequirement
+	var decoded requirement
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	*r = PluginAccessRequirement(decoded)
+	return nil
+}
+
+// PluginResourceQuery mirrors ResourceQuery in antrea-ui-components' access API.
+type PluginResourceQuery struct {
+	// Group is the API group, "" for the core group.
+	Group    string `json:"group"`
+	Resource string `json:"resource"`
+	Verb     string `json:"verb"`
+	Name     string `json:"name,omitempty"`
 }

@@ -14,18 +14,18 @@
  * limitations under the License.
  */
 
-import React, { useRef, useCallback, useMemo } from 'react';
+import React, { useRef, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import '@antrea/ui-components';
 import {
     can, canViewSummary, canViewOverview, holdsOverviewResources, canViewFlows, holdsFlowsClusterWide,
     sessionIdentity, GATE_TRACEFLOW_CREATE, SCOPE_CHANGE_EVENT, SCOPE_CHOSEN_EVENT,
 } from '@antrea/ui-components';
-import type { ScopeChangeDetail, ScopeChosenDetail } from '@antrea/ui-components';
+import type { PluginAccessRequirement, ScopeChangeDetail, ScopeChosenDetail } from '@antrea/ui-components';
 import { Navigate, useLocation, useSearchParams } from 'react-router';
 import { getLastScope, scopeSearch, setLastScope } from './lastScope';
 import { useLogout } from './logout';
-import { BUILTIN_LANDING_PAGE_TAB_ID, getEdgeExtraRenderers, getFlowTableColumnsProcessors } from './plugins';
+import { allowsPluginItem, BUILTIN_LANDING_PAGE_TAB_ID, getEdgeExtraRenderers, getFlowTableColumnsProcessors } from './plugins';
 import { useAccess, useScopeUser } from './access';
 import type { LandingPageTab } from './plugins';
 import type { RootState } from './store';
@@ -112,7 +112,6 @@ function useLitPage() {
 }
 
 interface OverviewTab { id: string; label: string; tag?: string; }
-// A stable default, so that omitting the prop does not give useMemo a new dependency every render.
 const NO_PLUGIN_TABS: LandingPageTab[] = [];
 
 // The query string of a tab: its own `tab`, and the Namespace scope the page has, which belongs to
@@ -140,7 +139,12 @@ export function OverviewPage({ pluginTabs = NO_PLUGIN_TABS }: { pluginTabs?: Lan
 
     const { ref, search } = useNamespaceScope();
 
-    const tabs: OverviewTab[] = useMemo(() => [{ id: BUILTIN_LANDING_PAGE_TAB_ID, label: 'Inventory & Events' }, ...pluginTabs], [pluginTabs]);
+    // A tab gated by `requires` (see plugins.ts) is left out for users who don't meet it; a ?tab=
+    // naming it then falls back to the built-in tab, like an unknown id.
+    const tabs: OverviewTab[] = [
+        { id: BUILTIN_LANDING_PAGE_TAB_ID, label: 'Inventory & Events' },
+        ...pluginTabs.filter(tab => allowsPluginItem({ summary, loaded }, tab.access)),
+    ];
     const activeTab = tabs.find(t => t.id === searchParams.get('tab')) ?? tabs[0];
 
     return (
@@ -262,7 +266,20 @@ export function SettingsPage() {
 // Generic route element for plugin pages: any plugin calling registerRoute() (see plugins.ts)
 // gets its custom element mounted here, with the same ref/session-expiry wiring as built-in
 // pages, keyed off the tag name discovered at runtime instead of a compile-time import.
-export function PluginPage({ tag }: { tag: string }) {
+//
+// A route registered with `requires` (see plugins.ts) gets the same permission panel as a gated
+// built-in page for a user who doesn't meet it, and renders nothing until the summary has loaded.
+export function PluginPage({ tag, access }: { tag: string, access?: readonly PluginAccessRequirement[] }) {
+    const accessState = useAccess();
+    if (!access?.length) return <PluginElement tag={tag} />;
+    return (
+        <RequirePermission allowed={allowsPluginItem(accessState, access)} loaded={accessState.loaded}>
+            <PluginElement tag={tag} />
+        </RequirePermission>
+    );
+}
+
+function PluginElement({ tag }: { tag: string }) {
     const { ref } = useLitPage();
     return React.createElement(tag, { ref });
 }

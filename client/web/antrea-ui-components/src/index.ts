@@ -86,5 +86,7 @@ export {
     GATE_ANTREA_NETWORKPOLICIES_LIST,
     GATE_EVENTS_LIST,
 } from './lib/access-api.js';
+export type { PluginAccessRequirement, PluginHostAccess } from './lib/plugin-access.js';
+export { parseAccessRequirements, meetsAccessRequirements, createPluginHostAccess } from './lib/plugin-access.js';
 export type { NamespaceAccess } from './lib/namespace-access.js';
 export { flowAccess } from './lib/namespace-access.js';

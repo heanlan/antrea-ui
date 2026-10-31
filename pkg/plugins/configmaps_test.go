@@ -72,6 +72,33 @@ func TestRegistryUpsertAndIndex(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestRegistryKeepsFederationRouteRequirements(t *testing.T) {
+	r := newTestRegistry(t)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "cm"},
+		Data: map[string]string{"manifest.json": withCompatibleAntreaUI(
+			`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[
+				{"path":"/admin","sidebarLabel":"Admin","exposedModule":"./Admin","requires":{"clusterAdmin":true}},
+				{"path":"/policies","sidebarLabel":"Policies","exposedModule":"./Policies","requires":{"resources":[{"group":"crd.antrea.io","resource":"clusternetworkpolicies","verb":"create"}]}},
+				{"path":"/open","sidebarLabel":"Open","exposedModule":"./Open"}
+			]}}`)},
+		BinaryData: map[string][]byte{"bundle.zip": buildZip(t, map[string]string{"index.js": "x", "remoteEntry.json": "x"})},
+	}
+
+	r.handleUpsert(t.Context(), cm)
+
+	index := r.Index()
+	require.Len(t, index, 1)
+	require.NotNil(t, index[0].Federation)
+	routes := index[0].Federation.Routes
+	require.Len(t, routes, 3)
+	assert.Equal(t, &apisv1.PluginAccessRequirement{ClusterAdmin: true}, routes[0].Requires)
+	assert.Equal(t, &apisv1.PluginAccessRequirement{Resources: []apisv1.PluginResourceQuery{
+		{Group: "crd.antrea.io", Resource: "clusternetworkpolicies", Verb: "create"},
+	}}, routes[1].Requires)
+	assert.Nil(t, routes[2].Requires)
+}
+
 // TestRegistryUpsertReadsManifestFromBinaryData covers a ConfigMap where manifest.json landed in
 // BinaryData rather than Data - what `kubectl create configmap --from-file` does for a file the
 // apiserver can't store as valid UTF-8 (a BOM, a stray non-UTF-8 byte). configMap (used by most
@@ -230,6 +257,36 @@ func TestRegistrySkipsInvalidConfigMaps(t *testing.T) {
 		"route with an unknown kind": func(t *testing.T) *corev1.ConfigMap {
 			return withBundle(t,
 				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","kind":"route"}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route requiring a resource query with no verb": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"resources":[{"group":"","resource":"pods"}]}}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route requiring a resource query with no resource": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"resources":[{"group":"","verb":"list"}]}}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route with an unknown requirement field": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"clusterAdmn":true}}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route with an unknown requirement beside a valid one": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"clusterAdmn":true,"resources":[{"group":"","resource":"pods","verb":"list"}]}}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route with an unknown resource query field": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"resources":[{"group":"","resource":"pods","verb":"list","names":["p"]}]}}]}}`,
+				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
+		},
+		"route whose requires has a mistyped clusterAdmin": func(t *testing.T) *corev1.ConfigMap {
+			return withBundle(t,
+				`{"name":"plugin","version":"0.1.0","entry":"index.js","federation":{"remoteEntry":"remoteEntry.json","routes":[{"path":"/plugin","sidebarLabel":"Plugin","exposedModule":"./Page","requires":{"clusterAdmin":"yes"}}]}}`,
 				map[string]string{"index.js": "x", "remoteEntry.json": "x"})
 		},
 		"route nested under a routes-kind route": func(t *testing.T) *corev1.ConfigMap {
