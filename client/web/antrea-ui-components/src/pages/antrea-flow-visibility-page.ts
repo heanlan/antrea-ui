@@ -16,6 +16,7 @@ import { html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { state, query, property } from 'lit/decorators.js';
 import * as d3 from 'd3';
+import { reconcileMapNodes, clusterMapNodes } from '../lib/service-map-layout.js';
 import { pageStyles, pickerStyles } from '../lib/styles.js';
 import {
     SCOPE_ALL, parseScopeParam, dispatchScopeChosen, writeScopeToURL,
@@ -994,7 +995,6 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
     private _refreshTimer: ReturnType<typeof setInterval> | null = null;
     private _ro: ResizeObserver | null = null;
     private _graphRef: GraphData = { nodes: [], edges: [], edgeMap: new Map(), nodeMap: new Map() };
-    private _prevTopologyKey = '';
 
     private _handleDocClick = (e: PointerEvent) => {
         const path = e.composedPath();
@@ -1239,12 +1239,7 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
         }
         // Setup ResizeObserver once the DOM is ready
         if (changed.has('viewMode') && this.viewMode === 'map') {
-            // The <svg> is always freshly created when switching into map view (render()
-            // ternaries between list/map templates, so Lit tears down and recreates the whole
-            // subtree). Reset the memoized topology key so _buildServiceMap() does a full
-            // rebuild instead of taking the "same topology, just update stroke widths" fast
-            // path against a brand new, empty SVG.
-            this._prevTopologyKey = '';
+            // Lit recreates the SVG; joins populate it from the retained node positions.
             this._setupResizeObserver();
             this._buildServiceMap();
         }
@@ -1527,35 +1522,12 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             this._selectedEdgeKey = null;
         }
 
-        // A collapsed node's label counts the peer addresses behind it, which can change while
-        // its id does not, so the label is part of the key or the drawn count would go stale.
-        // So is whether a node is service-only: it picks the shape, and a flow can turn a
-        // Service node into a workload one with neither the node nor any edge changing.
-        const nodeIds = graph.nodes
-            .map(n => n.addresses ? `${n.id}=${n.detail}` : n.serviceOnly ? `${n.id}:service` : n.id)
-            .sort().join(',');
-        const edgeIds = graph.edges.map(e => `${e.source}|${e.target}`).sort().join(',');
-        const topologyKey = `${nodeIds}::${edgeIds}::${this._svgWidth}`;
-
-        if (topologyKey === this._prevTopologyKey) {
-            // Only update edge widths
-            const sel = d3.select(svg);
-            sel.selectAll<SVGPathElement, D3Link>('path[fill="none"]')
-                .attr('stroke-width', d => {
-                    if (!d?.edgeKey) return 1;
-                    const e = graph.edgeMap.get(d.edgeKey);
-                    return e ? Math.min(1.5 + Math.log2(e.connectionCount + 1), 6) : 1;
-                });
-            return;
-        }
-        this._prevTopologyKey = topologyKey;
-        this._simulation?.stop();
-        this._simulation = null;
-
         const d3svg = d3.select(svg);
-        d3svg.selectAll('*').remove();
-
-        if (graph.nodes.length === 0) return;
+        const previousNodes = this._simulation?.nodes() ?? [];
+        const { nodes: d3Nodes, added } = reconcileMapNodes<D3Node>(
+            previousNodes, graph.nodes, graph.edges, { x: this._svgWidth / 2, y: HEIGHT / 2 },
+        );
+        const nodeById = new Map(d3Nodes.map(n => [n.id, n]));
 
         const bidirectionalPairs = new Set<string>();
         const edgeKeys = new Set(graph.edges.map(e => `${e.source}|${e.target}`));
@@ -1563,17 +1535,14 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             if (edgeKeys.has(`${e.target}|${e.source}`)) bidirectionalPairs.add([e.source, e.target].sort().join('|'));
         }
 
-        const defs = d3svg.append('defs');
+        const defs = d3svg.selectAll<SVGDefsElement, null>('defs').data([null]).join('defs');
         for (const role of EDGE_ROLES) {
-            defs.append('marker')
+            defs.selectAll<SVGMarkerElement, EdgeRole>(`#arrowhead-${role}`).data([role]).join('marker')
                 .attr('id', `arrowhead-${role}`)
                 .attr('viewBox', '-10 -5 10 10').attr('refX', 0).attr('refY', 0)
                 .attr('markerWidth', 7).attr('markerHeight', 7).attr('orient', 'auto')
-                .append('path').attr('d', 'M-10,-4L0,0L-10,4').style('fill', EDGE_COLOR_VAR[role]);
+                .selectAll<SVGPathElement, EdgeRole>('path').data([role]).join('path').attr('d', 'M-10,-4L0,0L-10,4').style('fill', EDGE_COLOR_VAR[role]);
         }
-
-        const d3Nodes: D3Node[] = graph.nodes.map(n => ({ ...n, x: undefined, y: undefined }));
-        const nodeById = new Map(d3Nodes.map(n => [n.id, n]));
 
         const d3Links: D3Link[] = graph.edges.map(e => {
             const pairKey = [e.source, e.target].sort().join('|');
@@ -1589,7 +1558,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             };
         });
 
-        const container = d3svg.append('g');
+        const container = d3svg.selectAll<SVGGElement, null>('g.map-content').data([null]).join('g')
+            .attr('class', 'map-content').attr('transform', d3.zoomTransform(svg).toString());
         const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.3, 3])
             .on('zoom', event => container.attr('transform', event.transform));
         d3svg.call(zoom);
@@ -1602,18 +1572,24 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             if (!arr) { arr = []; nsMap.set(n.namespace, arr); }
             arr.push(n);
         }
-        const nsHulls = container.append('g').attr('class', 'ns-hulls');
-        const nsGroups: { nodes: D3Node[]; path: d3.Selection<SVGPathElement, unknown, null, undefined>; label: d3.Selection<SVGTextElement, unknown, null, undefined>; }[] = [];
-        for (const [ns, nodes] of nsMap) {
-            if (nodes.length < 1) continue;
-            const path = nsHulls.append('path').style('fill', MAP_COLOR_VAR.nsHullFill).style('stroke', MAP_COLOR_VAR.nsHullStroke).attr('stroke-width', 1).attr('stroke-dasharray', '4,2');
-            const label = nsHulls.append('text').text(ns).style('fill', MAP_COLOR_VAR.nsLabel).attr('font-size', '10px').attr('font-weight', '600');
-            nsGroups.push({ nodes, path, label });
-        }
+        const layer = (name: string) => container.selectAll<SVGGElement, null>(`g.${name}`)
+            .data([null]).join('g').attr('class', name);
+        const nsHulls = layer('ns-hulls');
+        const hullGroups = nsHulls.selectAll<SVGGElement, [string, D3Node[]]>('g.namespace')
+            .data(Array.from(nsMap), d => d[0]).join('g').attr('class', 'namespace');
+        hullGroups.selectAll('path').data(d => [d]).join('path')
+            .style('fill', MAP_COLOR_VAR.nsHullFill).style('stroke', MAP_COLOR_VAR.nsHullStroke)
+            .attr('stroke-width', 1).attr('stroke-dasharray', '4,2');
+        hullGroups.selectAll('text').data(d => [d]).join('text').text(d => d[0])
+            .style('fill', MAP_COLOR_VAR.nsLabel).attr('font-size', '10px').attr('font-weight', '600');
+        const nsGroups = hullGroups.nodes().map(element => {
+            const group = d3.select<SVGGElement, [string, D3Node[]]>(element);
+            return { nodes: group.datum()[1], path: group.select('path'), label: group.select('text') };
+        });
 
         // Edge paths
-        const linkPaths = container.append('g').selectAll<SVGPathElement, D3Link>('path')
-            .data(d3Links).join('path')
+        const linkPaths = layer('edges').selectAll<SVGPathElement, D3Link>('path')
+            .data(d3Links, d => d.edgeKey).join('path')
             .attr('fill', 'none')
             .style('stroke', d => EDGE_COLOR_VAR[d.role])
             .attr('stroke-width', d => Math.min(1.5 + Math.log2(d.connectionCount + 1), 6))
@@ -1645,25 +1621,28 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             });
 
         // Edge labels
-        const edgeLabelGroups = container.append('g').selectAll<SVGGElement, D3Link>('g')
-            .data(d3Links.filter(d => d.label)).join('g');
-        edgeLabelGroups.append('rect').attr('rx', 3).attr('ry', 3).style('fill', MAP_COLOR_VAR.edgeLabelBg).style('stroke', d => EDGE_COLOR_VAR[d.role]).attr('stroke-width', 0.5).attr('stroke-opacity', 0.5);
-        edgeLabelGroups.append('text').text(d => d.label).attr('text-anchor', 'middle').attr('dominant-baseline', 'central').style('fill', MAP_COLOR_VAR.edgeLabelText).attr('font-size', '9px').attr('pointer-events', 'none');
+        const edgeLabelGroups = layer('edge-labels').selectAll<SVGGElement, D3Link>('g')
+            .data(d3Links.filter(d => d.label), d => d.edgeKey).join('g');
+        edgeLabelGroups.selectAll('rect').data(d => [d]).join('rect')
+            .attr('x', d => -textWidth(d.label, 9) / 2 - 3).attr('y', -6)
+            .attr('width', d => textWidth(d.label, 9) + 6).attr('height', 12).attr('rx', 3).attr('ry', 3).style('fill', MAP_COLOR_VAR.edgeLabelBg).style('stroke', d => EDGE_COLOR_VAR[d.role]).attr('stroke-width', 0.5).attr('stroke-opacity', 0.5);
+        edgeLabelGroups.selectAll('text').data(d => [d]).join('text').text(d => d.label).attr('text-anchor', 'middle').attr('dominant-baseline', 'central').style('fill', MAP_COLOR_VAR.edgeLabelText).attr('font-size', '9px').attr('pointer-events', 'none');
 
         // Nodes
-        const nodeGroup = container.append('g').selectAll<SVGGElement, D3Node>('g')
-            .data(d3Nodes).join('g')
+        const nodeGroup = layer('nodes').selectAll<SVGGElement, D3Node>('g.node')
+            .data(d3Nodes, d => d.id).join('g').attr('class', 'node')
             .style('cursor', 'grab')
             .call(d3.drag<SVGGElement, D3Node>()
-                .on('start', (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-                .on('drag', (event, d) => { d.fx = event.x; d.fy = event.y; })
-                .on('end', (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = d.x; d.fy = d.y; })
+                .on('start', (_event, d) => {
+                    this._simulation?.stop();
+                    d.fx = d.x; d.fy = d.y;
+                })
+                .on('drag', (event, d) => {
+                    d.x = d.fx = event.x; d.y = d.fy = event.y;
+                    d.vx = 0; d.vy = 0;
+                    draw();
+                })
             )
-            .on('dblclick', (_event, d) => {
-                d.fx = null; d.fy = null;
-                simulation.alphaTarget(0.3).restart();
-                setTimeout(() => simulation.alphaTarget(0), 1500);
-            })
             // Only the collapsed namespace has anything actionable to say. The anonymous peer
             // has no namespace to name a grant in, so it gets no tooltip at all - see
             // describeEndpoint - and a workload node is itself disclosed and needs none.
@@ -1683,6 +1662,13 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
 
         nodeGroup.each(function (this: SVGGElement, d: D3Node) {
             const g = d3.select(this);
+            // Metadata changes update the glyph, but preserve its group, handlers and position.
+            // serviceOnly picks the shape, and a flow can turn a Service node into a workload one
+            // with neither the node nor any edge changing.
+            const appearance = JSON.stringify([d.kind, d.shortName, d.detail, d.serviceOnly]);
+            if (g.attr('data-appearance') === appearance) return;
+            g.attr('data-appearance', appearance);
+            g.selectAll('*').remove();
             if (d.kind === 'external' || d.kind === 'undisclosed') {
                 const s = EXTERNAL_SIZE;
                 const stroke = d.kind === 'external' ? MAP_COLOR_VAR.externalStroke : MAP_COLOR_VAR.undisclosedStroke;
@@ -1755,54 +1741,49 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             }
         }
 
-        function clusterForce(alpha: number) {
-            const centroids = new Map<string, { x: number; y: number; count: number }>();
-            for (const n of d3Nodes) {
-                if (!inNamespaceHull(n)) continue;
-                const c = centroids.get(n.namespace);
-                if (c) { c.x += n.x!; c.y += n.y!; c.count++; }
-                else centroids.set(n.namespace, { x: n.x!, y: n.y!, count: 1 });
-            }
-            const strength = 0.15 * alpha;
-            for (const n of d3Nodes) {
-                if (!inNamespaceHull(n)) continue;
-                const c = centroids.get(n.namespace)!;
-                c.x /= c.count; c.y /= c.count;
-                n.vx! += (c.x - n.x!) * strength;
-                n.vy! += (c.y - n.y!) * strength;
-            }
-        }
-
-        const simulation = d3.forceSimulation<D3Node>(d3Nodes)
-            .force('link', d3.forceLink<D3Node, D3Link>(d3Links).id(d => d.id).distance(120))
-            .force('charge', d3.forceManyBody<D3Node>().strength(-400))
-            .force('center', d3.forceCenter<D3Node>(this._svgWidth / 2, HEIGHT / 2))
-            .force('collision', d3.forceCollide<D3Node>().radius(d => nodeCollideRadius(d) + 20))
-            .force('cluster', clusterForce as unknown as d3.Force<D3Node, D3Link>)
-            .on('tick', () => {
-                linkPaths.attr('d', d => {
-                    const s = d.source as D3Node; const t = d.target as D3Node;
-                    const [sx, sy] = nodeBoundary(s, t.x!, t.y!, 1);
-                    const [tx, ty] = nodeBoundary(t, s.x!, s.y!, 3);
-                    return curvedPath(sx, sy, tx, ty, d.curveOffset);
-                });
-                edgeLabelGroups.attr('transform', d => {
-                    const s = d.source as D3Node; const t = d.target as D3Node;
-                    const [mx, my] = quadMidpoint(s.x!, s.y!, t.x!, t.y!, d.curveOffset);
-                    return `translate(${mx},${my})`;
-                });
-                edgeLabelGroups.each(function (this: SVGGElement) {
-                    const g = d3.select(this);
-                    const bbox = (g.select('text').node() as SVGTextElement)?.getBBox();
-                    if (bbox) {
-                        g.select('rect').attr('x', -bbox.width / 2 - 3).attr('y', -bbox.height / 2 - 1).attr('width', bbox.width + 6).attr('height', bbox.height + 2);
-                    }
-                });
-                nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
-                updateHulls();
+        const draw = () => {
+            linkPaths.attr('d', d => {
+                const s = d.source as D3Node; const t = d.target as D3Node;
+                const [sx, sy] = nodeBoundary(s, t.x!, t.y!, 1);
+                const [tx, ty] = nodeBoundary(t, s.x!, s.y!, 3);
+                return curvedPath(sx, sy, tx, ty, d.curveOffset);
             });
+            edgeLabelGroups.attr('transform', d => {
+                const s = d.source as D3Node; const t = d.target as D3Node;
+                const [mx, my] = quadMidpoint(s.x!, s.y!, t.x!, t.y!, d.curveOffset);
+                return `translate(${mx},${my})`;
+            });
+            nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+            updateHulls();
+        };
 
+        const initial = previousNodes.length === 0;
+        const simulation = this._simulation ?? d3.forceSimulation<D3Node>();
+        // Remove old links before nodes: forceLink otherwise initializes stale endpoints.
+        if (added.length) simulation.force('anchorX', null).force('anchorY', null);
+        simulation.force('link', null).nodes(d3Nodes)
+            .force('link', d3.forceLink<D3Node, D3Link>(d3Links).id(d => d.id).distance(120))
+            .force('charge', d3.forceManyBody<D3Node>().strength(-400).distanceMin(60).distanceMax(400))
+            .force('collision', d3.forceCollide<D3Node>().radius(d => nodeCollideRadius(d) + 20))
+            .force('cluster', (alpha: number) => clusterMapNodes(
+                d3Nodes, n => inNamespaceHull(n) ? n.namespace : undefined, alpha,
+            ))
+            .on('tick', draw);
+        if (initial) {
+            simulation.force('center', d3.forceCenter<D3Node>(this._svgWidth / 2, HEIGHT / 2))
+                .force('anchorX', null).force('anchorY', null);
+        } else if (added.length) {
+            // Fixed nodes cannot absorb forceCenter's correction. Anchor only the free nodes
+            // near their seeds while bounded charge and collision separate overlaps.
+            const anchors = new Map(d3Nodes.map(n => [n.id, { x: n.x!, y: n.y! }]));
+            simulation.force('center', null)
+                .force('anchorX', d3.forceX<D3Node>(n => anchors.get(n.id)!.x).strength(0.2))
+                .force('anchorY', d3.forceY<D3Node>(n => anchors.get(n.id)!.y).strength(0.2));
+        }
+        if (!d3Nodes.length) simulation.stop();
+        else if (added.length) simulation.alpha(initial ? 1 : 0.15).alphaTarget(0).restart();
         this._simulation = simulation;
+        draw();
     }
 
     private _showTooltip(event: MouseEvent, edge: WorkloadEdge) {

@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { FlowStore } from '../lib/flow-store';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import './antrea-flow-visibility-page';
+import * as d3 from 'd3';
+import { FlowStore } from '../lib/flow-store';
+import type { FlowEntry } from '../lib/flow-store';
+import type { PositionedNode } from '../lib/service-map-layout';
 import { SCOPE_CHANGE_EVENT, SCOPE_CHOSEN_EVENT } from '../lib/namespace-scope';
 import type { ScopeChangeDetail, ScopeChosenDetail } from '../lib/namespace-scope';
 import type { AntreaFlowVisibilityPage, D3Node } from './antrea-flow-visibility-page';
@@ -3483,5 +3486,147 @@ describe('nodeBoundary', () => {
         // Applying the semicircle there would end the edge at y of about 22.46, inside the side.
         const [, y] = nodeBoundary(node(true), 2, 100, 0);
         expect(y).toBeCloseTo(23, 5);
+    });
+});
+
+describe('AntreaFlowVisibilityPage — incremental service map', () => {
+    interface MapState {
+        _entries: FlowEntry[];
+        _svgWidth: number;
+        _simulation: d3.Simulation<PositionedNode, undefined>;
+        _buildServiceMap(): void;
+    }
+
+    async function mountMap() {
+        const page = await mount(async () => sseResponse([]));
+        await vi.advanceTimersByTimeAsync(0);
+        page.viewMode = 'map';
+        await page.updateComplete;
+        return { page, state: page as unknown as MapState };
+    }
+
+    async function update(page: AntreaFlowVisibilityPage, state: MapState, flows: Flow[]) {
+        const store = new FlowStore();
+        store.upsertBatch(flows);
+        state._entries = store.getAll();
+        await page.updateComplete;
+    }
+
+    test('edge churn and resize retain node positions, SVG identity and zoom without reheating', async () => {
+        const { page, state } = await mountMap();
+        const forward = makeFlow();
+        const reverse = makeFlow({ srcPod: 'server-xyz34', dstPod: 'client-abc12', srcIP: '10.0.0.2', dstIP: '10.0.0.1' });
+        await update(page, state, [forward]);
+        const simulation = state._simulation.stop().alpha(0);
+        const nodes = [...simulation.nodes()];
+        const positions = nodes.map(n => [n.x, n.y]);
+        const root = page.shadowRoot!;
+        const nodeElements = Array.from(root.querySelectorAll('.nodes .node'));
+        const path = root.querySelector('.edges path');
+        const hull = root.querySelector('.ns-hulls path');
+        const svg = root.querySelector('svg')!;
+        const transform = d3.zoomIdentity.translate(42, 21).scale(1.5);
+        (svg as SVGSVGElement & { __zoom: d3.ZoomTransform }).__zoom = transform;
+        const restart = vi.spyOn(simulation, 'restart');
+
+        await update(page, state, [forward, reverse]);
+        expect(root.querySelectorAll('.edges path')).toHaveLength(2);
+        await update(page, state, [forward]);
+        state._svgWidth = 800;
+        await page.updateComplete;
+
+        expect(state._simulation).toBe(simulation);
+        expect(simulation.nodes()[0]).toBe(nodes[0]);
+        expect(simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
+        Array.from(root.querySelectorAll('.nodes .node')).forEach((node, i) => expect(node).toBe(nodeElements[i]));
+        expect(root.querySelector('.edges path')).toBe(path);
+        expect(root.querySelector('.ns-hulls path')).toBe(hull);
+        expect(root.querySelector('.map-content')!.getAttribute('transform')).toBe(transform.toString());
+        expect(root.querySelectorAll('defs marker')).toHaveLength(3);
+        expect(restart).not.toHaveBeenCalled();
+        expect(simulation.alpha()).toBe(0);
+        restart.mockRestore();
+    });
+
+    test('updates labels and verdicts without bounding-box reads, including ticks', async () => {
+        const { page, state } = await mountMap();
+        await update(page, state, [makeFlow()]);
+        const label = page.shadowRoot!.querySelector('.edge-labels g')!;
+        const oldWidth = Number(label.querySelector('rect')!.getAttribute('width'));
+        const bbox = vi.fn(() => { throw new Error('synchronous label measurement'); });
+        Object.defineProperty(label.querySelector('text'), 'getBBox', { value: bbox });
+        await update(page, state, [makeFlow({ dstPort: 443, ingressPolicy: 'deny', ingressAction: NetworkPolicyRuleAction.Drop })]);
+        expect(page.shadowRoot!.querySelector('.edge-labels g')).toBe(label);
+        expect(label.textContent).toBe('TCP/443');
+        expect(Number(label.querySelector('rect')!.getAttribute('width'))).toBeGreaterThan(oldWidth);
+        expect(page.shadowRoot!.querySelector('.edges path')!.getAttribute('marker-end')).toBe('url(#arrowhead-drop)');
+        state._simulation.stop().tick(5);
+        state._simulation.on('tick')!.call(state._simulation);
+        expect(bbox).not.toHaveBeenCalled();
+    });
+
+    test('successive node additions preserve old positions and empty graphs can recover', async () => {
+        const { page, state } = await mountMap();
+        const original = makeFlow();
+        await update(page, state, [original]);
+        state._simulation.stop().tick(300);
+        const first = state._simulation.nodes()[0];
+        const position = [first.x, first.y];
+        const next = makeFlow({ dstPod: 'new-xyz34', dstIP: '10.0.0.3' });
+        await update(page, state, [original, next]);
+        expect(state._simulation.alpha()).toBe(0.15);
+        expect(state._simulation.force('center')).toBeUndefined();
+        state._simulation.stop().tick(100);
+        expect([first.x, first.y]).toEqual(position);
+        const third = makeFlow({ dstPod: 'third-xyz34', dstIP: '10.0.0.4' });
+        await update(page, state, [original, next, third]);
+        state._simulation.stop().tick(100);
+        expect([first.x, first.y]).toEqual(position);
+        expect(state._simulation.nodes().every(n => Number.isFinite(n.x) && Number.isFinite(n.y))).toBe(true);
+        await update(page, state, []);
+        expect(page.shadowRoot!.querySelectorAll('.node, .edges path, .edge-labels g, .namespace')).toHaveLength(0);
+        await update(page, state, [original]);
+        expect(page.shadowRoot!.querySelectorAll('.node')).toHaveLength(2);
+        expect(state._simulation.alpha()).toBe(1);
+    });
+
+    test('dragging moves only the selected node and never reheats the simulation', async () => {
+        const { page, state } = await mountMap();
+        await update(page, state, [makeFlow()]);
+        const simulation = state._simulation.stop();
+        const [dragged, other] = simulation.nodes();
+        const original = [dragged.x!, dragged.y!];
+        const otherPosition = [other.x, other.y];
+        const restart = vi.spyOn(simulation, 'restart');
+        const node = page.shadowRoot!.querySelector('.nodes .node')!;
+        const mouse = (type: string, clientX: number, clientY: number) => {
+            const event = new MouseEvent(type, { bubbles: true, clientX, clientY });
+            // jsdom rejects Vitest's Window proxy as a UIEvent constructor argument.
+            Object.defineProperty(event, 'view', { value: window });
+            return event;
+        };
+        node.dispatchEvent(mouse('mousedown', 40, 50));
+        window.dispatchEvent(mouse('mousemove', 100, 80));
+        window.dispatchEvent(mouse('mouseup', 100, 80));
+        expect(dragged.x).toBeCloseTo(original[0] + 60);
+        expect(dragged.y).toBeCloseTo(original[1] + 30);
+        expect([other.x, other.y]).toEqual(otherPosition);
+        expect(node.getAttribute('transform')).toBe(`translate(${dragged.x},${dragged.y})`);
+        expect(restart).not.toHaveBeenCalled();
+        restart.mockRestore();
+    });
+
+    test('recreates a removed SVG on returning from list view using retained positions', async () => {
+        const { page, state } = await mountMap();
+        await update(page, state, [makeFlow()]);
+        state._simulation.stop().tick(300);
+        const positions = state._simulation.nodes().map(n => [n.x, n.y]);
+        page.viewMode = 'list';
+        await page.updateComplete;
+        page.viewMode = 'map';
+        await page.updateComplete;
+        expect(page.shadowRoot!.querySelectorAll('.node')).toHaveLength(2);
+        expect(page.shadowRoot!.querySelector('.edges path')!.getAttribute('d')).toMatch(/^M/);
+        expect(state._simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
     });
 });
