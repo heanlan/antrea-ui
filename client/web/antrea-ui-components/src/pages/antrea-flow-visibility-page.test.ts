@@ -4303,6 +4303,9 @@ describe('AntreaFlowVisibilityPage — incremental service map', () => {
         expect(simulation.nodes()).toEqual(nodes);
         expect(simulation.nodes().map(n => [n.x, n.y])).toEqual(positions);
         restart.mockRestore();
+        // D3 suppresses the click following a drag until its zero-delay timer fires.
+        // Drain it before restoring real timers so later tests can click normally.
+        await vi.advanceTimersByTimeAsync(0);
     });
 
     test('returning from list view restores node positions and the interactive zoom viewport', async () => {
