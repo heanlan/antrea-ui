@@ -6,7 +6,7 @@ Issue: [Service Map: the "All Namespaces" view is unreadable on a large cluster]
 
 ## Scope and dependencies
 
-This branch builds on issue #1523's incremental layout (`931247df`). Antonin's
+This branch builds on issue #1523's incremental layout (#1575). Antonin's
 issue description and prototype define the behavior; the supplied screenshots
 illustrate expandable Namespace outlines. No backend or dependency changes are
 required. Single-Namespace scope keeps workload granularity.
@@ -58,6 +58,11 @@ The plugin `EdgeSelection` contract gains optional `sourceKind` and `targetKind`
 The SDK re-exports that same type. Existing fields remain unchanged; IDs are
 opaque, and consumers can distinguish namespace aggregates without parsing an
 ID. Older hosts may omit kinds. Plugin documentation records these semantics.
+
+The Service Map toolbar wraps within narrow viewports. The edge selector,
+visible count and namespace action retain their intrinsic widths, while the
+explanatory text can move to a separate line. This keeps controls reachable when
+the document is enlarged without squeezing their labels.
 
 ## Independent design decisions
 

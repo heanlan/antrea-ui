@@ -862,6 +862,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
             font-size: 0.875rem;
         }
 
+        .map-toolbar { gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+        .map-toolbar > label, .map-toolbar > antrea-button, .map-edge-count { flex-shrink: 0; }
         .map-container { position: relative; width: 100%; }
         .map-svg { display: block; border: 1px solid var(--antrea-color-border, #314351); border-radius: 4px; background: var(--antrea-color-bg-dark, #17242b); }
         .map-tooltip {
@@ -2480,7 +2482,7 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
 
     private _renderServiceMap() {
         return html`
-            <div class="row" style="gap:12px;margin-bottom:8px">
+            <div class="row map-toolbar">
                 <label>Busiest edges (connections)
                     <select class="field-select" aria-label="Busiest edges" @change=${(event: Event) => {
                         this._busiestEdges.clear();
