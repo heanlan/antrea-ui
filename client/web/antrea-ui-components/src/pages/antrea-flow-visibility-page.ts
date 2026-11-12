@@ -577,7 +577,7 @@ function edgeLabel(edge: WorkloadEdge): string {
 
 // ── D3 node geometry ─────────────────────────────────────────────────────────
 
-interface D3Node extends d3.SimulationNodeDatum { id: string; shortName: string; namespace: string; kind: NodeKind; detail: string; serviceOnly: boolean; }
+export interface D3Node extends d3.SimulationNodeDatum { id: string; shortName: string; namespace: string; kind: NodeKind; detail: string; serviceOnly: boolean; }
 
 /** Whether this node is drawn as a diamond: an aggregate of unbounded cardinality with no
  * namespace, excluded from the hulls and not drillable. `undisclosed` reuses External's shape
@@ -619,10 +619,13 @@ function nodeHalfSize(d: D3Node): { hw: number; hh: number } {
     if (d.kind === 'undisclosedNamespace') {
         return { hw: Math.max(w, COLLAPSED_NS_MIN_WIDTH) / 2, hh: (COLLAPSED_NS_HEIGHT + NODE_PADDING_Y) / 2 };
     }
-    return { hw: w / 2, hh: (38 + NODE_PADDING_Y) / 2 };
+    const hh = (38 + NODE_PADDING_Y) / 2;
+    // A pill is a rect with rx = hh. Narrower than a circle, SVG clamps rx to the half width and
+    // draws an ellipse, which nodeBoundary does not model. Keep a pill at least as wide as one.
+    return { hw: d.serviceOnly ? Math.max(w / 2, hh) : w / 2, hh };
 }
 
-function nodeBoundary(d: D3Node, tx: number, ty: number, gap: number): [number, number] {
+export function nodeBoundary(d: D3Node, tx: number, ty: number, gap: number): [number, number] {
     const cx = d.x ?? 0; const cy = d.y ?? 0;
     const dx = tx - cx; const dy = ty - cy;
     const len = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -632,6 +635,16 @@ function nodeBoundary(d: D3Node, tx: number, ty: number, gap: number): [number, 
     if (isDiamond(d)) scale = hw / (Math.abs(ux) + Math.abs(uy));
     else if (Math.abs(ux) * hh > Math.abs(uy) * hw) scale = hw / Math.abs(ux);
     else scale = hh / Math.abs(uy);
+    if (d.serviceOnly) {
+        // A pill's ends are semicircles of radius hh centred at (+/-ex, 0). Where the ray
+        // crosses the bounding box beyond that centre it would stop short of the curve, so
+        // leave through the semicircle instead.
+        const ex = Math.sign(ux) * Math.max(hw - hh, 0);
+        if (Math.abs(ux * scale) > Math.abs(ex)) {
+            const proj = ux * ex;
+            scale = proj + Math.sqrt(proj * proj - ex * ex + hh * hh);
+        }
+    }
     return [cx + ux * (scale + gap), cy + uy * (scale + gap)];
 }
 
@@ -1779,7 +1792,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
                 return;
             }
             // A node that is only ever a destination Service is a pill, where a workload is a
-            // rounded rectangle. Same bounding box, so edges, collision and hulls need no case.
+            // rounded rectangle. Same bounding box, so collision and hulls need no case; edges get
+            // one in nodeBoundary, because they end on the curve.
             const rx = d.serviceOnly ? hh : NODE_RX;
             g.append('rect').attr('x', -hw).attr('y', -hh).attr('width', hw * 2).attr('height', hh * 2).attr('rx', rx).attr('ry', rx).style('fill', MAP_COLOR_VAR.nodeFill).style('stroke', MAP_COLOR_VAR.nodeStroke).attr('stroke-width', 1.5);
             g.append('text').text(d.shortName).attr('dy', -3).attr('text-anchor', 'middle').style('fill', MAP_COLOR_VAR.nodeText).attr('font-size', '12px').attr('font-weight', '600');
@@ -2228,6 +2242,8 @@ export class AntreaFlowVisibilityPage extends SessionAwarePage {
                     <div class="legend-row"><svg width="24" height="14"><rect x="1" y="1" width="22" height="12" rx="6" ry="6" style="fill:${MAP_COLOR_VAR.nodeFill};stroke:${MAP_COLOR_VAR.nodeStroke}" stroke-width="1.5"/></svg><span>Service (destination only)</span></div>
                     <div class="legend-row"><svg width="24" height="14"><rect x="1" y="1" width="22" height="12" rx="3" ry="3" style="fill:${MAP_COLOR_VAR.nodeFill};stroke:${MAP_COLOR_VAR.nodeStroke}" stroke-width="1.5"/></svg><span>Workload</span></div>
                     <div class="legend-row"><svg width="24" height="14"><polygon points="12,1 23,7 12,13 1,7" style="fill:${MAP_COLOR_VAR.externalFill};stroke:${MAP_COLOR_VAR.externalStroke}" stroke-width="1.5"/></svg><span>External</span></div>
+                    <div class="legend-row"><svg width="24" height="14"><polygon points="12,1 23,7 12,13 1,7" style="fill:${MAP_COLOR_VAR.undisclosedFill};stroke:${MAP_COLOR_VAR.undisclosedStroke}" stroke-width="1.5"/></svg><span>Undisclosed (in cluster)</span></div>
+                    <div style="margin-top:2px;color:var(--antrea-color-text-muted, #8899a4)">Line thickness = connection count</div>
                 </div>
                 <div class="map-controls" part="map-controls" role="group" aria-label="Map zoom controls">
                     ${this._renderMapControl('Zoom in', () => this._zoomMap(MAP_ZOOM_STEP), svg`

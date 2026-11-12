@@ -17,8 +17,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import './antrea-flow-visibility-page';
 import { SCOPE_CHANGE_EVENT, SCOPE_CHOSEN_EVENT } from '../lib/namespace-scope';
 import type { ScopeChangeDetail, ScopeChosenDetail } from '../lib/namespace-scope';
-import type { AntreaFlowVisibilityPage } from './antrea-flow-visibility-page';
-import { searchFilterOptions, typedNamespace, typedPod, typedService } from './antrea-flow-visibility-page';
+import type { AntreaFlowVisibilityPage, D3Node } from './antrea-flow-visibility-page';
+import { nodeBoundary, searchFilterOptions, typedNamespace, typedPod, typedService } from './antrea-flow-visibility-page';
 import { FLOW_QUERY_STATE_EVENT } from '../lib/flow-stream';
 import type { FlowQuery, FlowQueryStateDetail, FlowStreamFilter } from '../lib/flow-stream';
 import { resetAccessSummary } from '../lib/access-api';
@@ -3177,12 +3177,26 @@ describe('AntreaFlowVisibilityPage — collapsed peers in the service map', () =
         expect(Number(workload.getAttribute('rx'))).toBeLessThan(Number(workload.getAttribute('height')) / 2);
     });
 
+    test('a service-only node with a very short name is still drawn as a pill, not an ellipse', async () => {
+        const { page } = await graphFor([
+            makeFlow({ dstNs: 'ns', dstPod: 'server-xyz34', destService: 'ns/a:http' }),
+        ]);
+
+        const rect = Array.from(page.shadowRoot!.querySelectorAll('#graph-svg g'))
+            .find(g => g.querySelector('rect') && g.querySelector('text')?.textContent === 'a')!
+            .querySelector('rect')!;
+        const [width, height, rx] = ['width', 'height', 'rx'].map(a => Number(rect.getAttribute(a)));
+        // SVG clamps rx to half the width, so a rect narrower than it is tall is an ellipse.
+        expect(rx).toBeLessThanOrEqual(width / 2);
+        expect(rx).toBe(height / 2);
+    });
+
     test('the legend names the node shapes', async () => {
         const { page } = await graphFor([makeFlow()]);
 
         const rows = Array.from(page.shadowRoot!.querySelectorAll('.map-legend .legend-row'))
             .map(r => r.textContent?.trim());
-        expect(rows).toEqual(expect.arrayContaining(['Service (destination only)', 'Workload', 'External']));
+        expect(rows).toEqual(expect.arrayContaining(['Service (destination only)', 'Workload', 'External', 'Undisclosed (in cluster)']));
     });
 
     // The node and the edge are the same before and after: the second flow reaches the same node
@@ -3594,5 +3608,26 @@ describe('flow query state event', () => {
         vi.mocked(fetch).mockImplementation(async () => sseResponse([]));
         await setQuery(page, undefined);
         expect(seen.at(-1)).toEqual({ state: 'idle', snapshotCount: 0, maxCount: 0, truncated: false, evicted: false, droppedCount: 0 });
+    });
+});
+
+describe('nodeBoundary', () => {
+    const node = (serviceOnly: boolean): D3Node =>
+        ({ id: 'n', shortName: 'xsvc', namespace: 'ns', kind: 'workload', detail: 'ns', serviceOnly, x: 0, y: 0 });
+
+    test('a Service-only node ends an edge on its curved end, a workload on its corner', () => {
+        // Aimed at the bounding box's corner, where the pill is curved and the rectangle is not.
+        // hw = 28.4, hh = 23, so the pill's end is a semicircle of radius 23 centred at x = 5.4.
+        const [px, py] = nodeBoundary(node(true), 28.4, 23, 0);
+        expect(Math.hypot(px - 5.4, py)).toBeCloseTo(23, 5);
+        const [wx, wy] = nodeBoundary(node(false), 28.4, 23, 0);
+        expect([wx, wy]).toEqual([28.4, 23]);
+    });
+
+    test('a Service-only node ends an edge on its flat side where the pill is flat', () => {
+        // Aimed slightly off the vertical, so that the ray reaches the box inside the flat side.
+        // Applying the semicircle there would end the edge at y of about 22.46, inside the side.
+        const [, y] = nodeBoundary(node(true), 2, 100, 0);
+        expect(y).toBeCloseTo(23, 5);
     });
 });
