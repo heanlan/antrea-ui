@@ -23,6 +23,7 @@ import type { SessionInfo } from '@antrea/ui-components';
 import { Outlet, Link } from 'react-router';
 import NavTab from './nav';
 import { useLogout } from './logout';
+import { PluginScopeBridge } from './PluginScopeBridge';
 import { AppErrorProvider, AppErrorNotification } from './errors';
 import { AccessProvider } from './access';
 import { Provider, useSelector, useDispatch } from 'react-redux';
@@ -98,6 +99,7 @@ function AuthShell({ pluginSidebarEntries }: { pluginSidebarEntries: PluginSideb
 
     return (
         <>
+            <PluginScopeBridge />
             <NavTab pluginSidebarEntries={pluginSidebarEntries} />
             <main className="app-content">
                 <Outlet />

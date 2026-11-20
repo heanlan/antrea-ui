@@ -1085,8 +1085,66 @@ counts; the entry's own `requires` only gates it. A custom-element route, and an
 Overview tab, are handed the query string as a `locationSearch` property. A
 federated Angular route reads `namespace` from the router itself.
 
-A custom-element page does its part with two events and one property, as the
-built-in pages do. The host records the last scope chosen only from
+**Using the Namespace picker.** The easiest way to do all of this is to render
+`<antrea-namespace-scope>`, the picker Overview and Flow Visibility use, with the
+same default order, URL handling and last-scope bookkeeping. It renders into its
+own shadow root, so it needs none of your styles, and the host dispatches nothing
+more from you. Pass it the `locationSearch` the host gave your element and the
+same `resources` as the route's `requires`, and listen for
+`antrea-namespace-scope-state`, whose `detail` is the state (`scope`, `source`,
+`access`, `error`, `note`, `offerAll`). It bubbles but is not composed, so it
+stays inside your shadow root:
+
+```ts
+import { LitElement, html } from 'lit';
+import { property, state } from 'lit/decorators.js';
+import { registerRoute, namespaceScopeSupported } from '@antrea/ui-plugin-sdk';
+import type { NamespaceScopeState } from '@antrea/ui-plugin-sdk';
+
+const PODS = [{ group: '', resource: 'pods', verb: 'list' }];
+
+class PodsPage extends LitElement {
+    @property({ attribute: false }) locationSearch?: string;
+    @state() private scope: NamespaceScopeState | null = null;
+
+    render() {
+        if (!namespaceScopeSupported()) return html`<p>This page needs a newer Antrea UI.</p>`;
+        return html`
+            <antrea-namespace-scope .locationSearch=${this.locationSearch} .resources=${PODS}
+                @antrea-namespace-scope-state=${(e: CustomEvent<NamespaceScopeState>) => {
+                    this.scope = e.detail;
+                    void this.load();
+                }}></antrea-namespace-scope>`;
+    }
+}
+customElements.define('pods-page', PodsPage);
+registerRoute({ path: '/plugin/pods', tag: 'pods-page',
+    requires: { namespaceScope: true, resources: PODS } });
+```
+
+`state.scope` is `{ kind: 'all' }`, `{ kind: 'namespace', namespace }` or `null`
+(still loading, an invalid URL, or nothing to pick). Only `source: 'url'` and
+`'picker'` are choices; a `'default'` is never reported or written. The state also
+carries `error` for an invalid `?namespace=` or typed name, which the element
+shows itself. Authorization is still the API's: the picker is a hint, so handle a
+403.
+
+For a picker of your own, or a page that uses no Lit, `namespaceScope().create({
+target, resources })` from the SDK gives the same logic without the element: call
+`setLocationSearch()` with each `locationSearch`, `subscribe()` for the state,
+`select()` for a choice and `dispose()` when the page goes away. Its
+`state().access` holds what a picker offers (`candidates`, `cut`, `mayList`).
+`namespaceScope().search(scope)` builds the query string that carries a scope to
+another Namespace-aware page. Do not bundle your own copy of the Namespace list
+code: each plugin bundle has its own module state, which the host cannot reset when
+the user signs out.
+
+`namespaceScope()` and the element need a host that ships them. Raise
+`compatibleAntreaUI` to that release and check `namespaceScopeSupported()`, as
+above: on an older host the tag is an unknown element and renders nothing.
+
+Without the element, a custom-element page does its part with two events and
+one property, as the built-in pages do. The host records the last scope chosen only from
 `antrea-namespace-scope-chosen`, so a page that merely reads `locationSearch`
 leaves the Overview and Flow Visibility entries carrying a stale scope. The page
 must:
