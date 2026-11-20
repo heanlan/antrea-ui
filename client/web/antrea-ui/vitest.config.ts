@@ -20,6 +20,9 @@ import path from 'node:path'
 export default defineConfig({
     resolve: {
         preserveSymlinks: true,
+        // Exercise the standalone example's source with this test host's dependencies, even
+        // when the example's own npm dependencies have not been installed.
+        dedupe: ['lit', '@antrea/ui-plugin-sdk'],
         // See the matching alias in vite.config.ts: sends the bare specifier to source instead
         // of the built dist/ that @antrea/ui-components' package.json "exports" points at, so
         // `yarn test` picks up antrea-ui-components changes without a rebuild there first.

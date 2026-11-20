@@ -18,6 +18,7 @@ import { resetAccessSummary } from './access-api.js';
 import type { AccessSummary } from './access-api.js';
 import { createNamespaceScope } from './namespace-scope-controller.js';
 import type { NamespaceScopeHostAdapter, NamespaceScopeOptions } from './namespace-scope-controller.js';
+import { createPluginNamespaceScope } from './plugin-namespace-scope.js';
 import { SCOPE_CHANGE_EVENT, SCOPE_CHOSEN_EVENT } from './namespace-scope.js';
 
 const PODS = [{ group: '', resource: 'pods', verb: 'list' }];
@@ -192,6 +193,18 @@ describe('createNamespaceScope', () => {
         handle.dispose();
     });
 
+    it('rejects a Namespace value that matches the internal All Namespaces sentinel', () => {
+        const { handle, chosen, changes } = setup();
+        handle.setLocationSearch('?namespace=ns-a');
+        chosen.length = 0;
+        handle.select({ kind: 'namespace', namespace: '__cluster_wide__' });
+        expect(handle.state().scope).toEqual({ kind: 'namespace', namespace: 'ns-a' });
+        expect(handle.state().error).toContain('not a valid namespace name');
+        expect(chosen).toEqual([]);
+        expect(changes).toEqual([]);
+        handle.dispose();
+    });
+
     it('writes and reports a pick once, and ignores the echo of its own write', async () => {
         const { handle, chosen, changes } = setup();
         handle.setLocationSearch('');
@@ -296,6 +309,76 @@ describe('createNamespaceScope', () => {
         handle.dispose();
     });
 
+    it('clears the old default synchronously when the permissions change', async () => {
+        body = summary(clusterPods);
+        const { handle, chosen, changes } = setup();
+        handle.setLocationSearch('');
+        await loaded(handle);
+        expect(handle.state().scope).toEqual({ kind: 'all' });
+        const seen: unknown[] = [];
+        handle.subscribe(s => seen.push(s.scope));
+        handle.setResources([{ group: '', resource: 'services', verb: 'list' }]);
+        expect(handle.state().access).toBeNull();
+        expect(handle.state().scope).toBeNull();
+        // A URL update in the same turn must not default using the old resource's verdict.
+        handle.setLocationSearch('?view=other');
+        expect(handle.state().scope).toBeNull();
+        await loaded(handle);
+        expect(handle.state().scope).toEqual({ kind: 'namespace', namespace: 'ns-a' });
+        expect(seen).not.toContainEqual({ kind: 'all' });
+        expect(chosen).toEqual([]);
+        expect(changes).toEqual([]);
+        handle.dispose();
+    });
+
+    it.each(['url', 'picker'])('preserves an explicit %s scope while permissions change', async source => {
+        body = summary(clusterPods);
+        const { handle } = setup();
+        handle.setLocationSearch(source === 'url' ? '?namespace=_all' : '');
+        await loaded(handle);
+        if (source === 'picker') handle.select({ kind: 'all' });
+        handle.setResources([{ group: '', resource: 'services', verb: 'list' }]);
+        expect(handle.state().scope).toEqual({ kind: 'all' });
+        await loaded(handle);
+        expect(handle.state().access?.clusterWide).toBe('denied');
+        expect(handle.state().scope).toEqual({ kind: 'all' });
+        handle.dispose();
+    });
+
+    it('accepts anyOf and ignores equivalent resources from a fresh render', async () => {
+        body = summary(clusterPods);
+        const { handle } = setup({ resources: { anyOf: PODS } });
+        handle.setLocationSearch('');
+        await loaded(handle);
+        expect(handle.state().scope).toEqual({ kind: 'all' });
+        const listener = vi.fn();
+        handle.subscribe(listener);
+        handle.setResources(PODS.map(q => ({ ...q })));
+        await Promise.resolve();
+        expect(listener).not.toHaveBeenCalled();
+        handle.dispose();
+    });
+
+    it('uses only the latest permissions when changed during a pending Namespace list', async () => {
+        body = summary({ ...clusterPods, namespaces: ['*'] });
+        let resolveList!: (response: Response) => void;
+        const pending = new Promise<Response>(resolve => { resolveList = resolve; });
+        fetchMock.mockImplementation((url: string) => String(url).includes('/k8s/api/v1/namespaces')
+            ? pending : Promise.resolve(new Response(JSON.stringify(body), { status: 200 })));
+        const { handle } = setup();
+        handle.setLocationSearch('');
+        await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+        handle.setResources(undefined);
+        handle.setResources([{ group: '', resource: 'services', verb: 'list' }]);
+        const seen: unknown[] = [];
+        handle.subscribe(s => seen.push(s.scope));
+        resolveList(new Response(JSON.stringify({ items: [{ metadata: { name: 'ns-a' } }] }), { status: 200 }));
+        await loaded(handle);
+        expect(handle.state().access?.clusterWide).toBe('denied');
+        expect(seen).toEqual([{ kind: 'namespace', namespace: 'ns-a' }]);
+        handle.dispose();
+    });
+
     it('fetches a fresh Namespace list for a controller created after sign-out', async () => {
         body = summary({ namespaces: ['*'] });
         const names = { items: [{ metadata: { name: 'old-user-ns' } }] };
@@ -372,6 +455,22 @@ describe('createNamespaceScope with a host adapter', () => {
         handle.setLocationSearch('');
         await vi.waitFor(() => expect(adapter.sessionExpired).toHaveBeenCalledTimes(1));
         expect(events).not.toHaveBeenCalled();
+        handle.dispose();
+    });
+
+    it('keeps the host adapter and lifecycle even when a plugin passes internal options', async () => {
+        status = 401;
+        const adapter = { writeScope: vi.fn(), rememberScope: vi.fn(), sessionExpired: vi.fn() };
+        const internal = { adapter: undefined, onSessionExpired: vi.fn(), isActive: () => false };
+        const handle = createPluginNamespaceScope(adapter).create({ target: new EventTarget(), ...internal });
+        handle.setLocationSearch('?namespace=ns-a');
+        await loaded(handle);
+        handle.select({ kind: 'namespace', namespace: 'ns-b' });
+        expect(adapter.sessionExpired).toHaveBeenCalledTimes(1);
+        expect(internal.onSessionExpired).not.toHaveBeenCalled();
+        expect(adapter.writeScope).toHaveBeenCalledWith('ns-b');
+        expect(adapter.rememberScope).toHaveBeenLastCalledWith('ns-b');
+        expect(window.location.search).toBe('');
         handle.dispose();
     });
 });

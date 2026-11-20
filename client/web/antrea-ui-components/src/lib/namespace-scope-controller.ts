@@ -61,13 +61,20 @@ export interface NamespaceScopeHostAdapter {
     sessionExpired(): void;
 }
 
+/** The permissions of a Namespace-aware page, any-of in either form. */
+export type NamespaceScopeResources = ResourceQuery[] | { anyOf: ResourceQuery[] };
+
 export interface NamespaceScopeOptions {
     /** Where the scope events are dispatched from: the page's own element, or any node inside it
-     * (the events bubble and are composed). Not used for what `adapter` handles. */
+     * (the events bubble and are composed). A host adapter may handle them directly. */
     target: EventTarget;
     /** The page's permissions, any-of, as in `requires.resources`. They decide the cluster-wide
      * verdict. Absent: allowed for a cluster admin, unknown for anyone else. */
-    resources?: ResourceQuery[];
+    resources?: NamespaceScopeResources;
+}
+
+/** Host-only options; plugin handles always use the host's navigation and session handling. */
+export interface NamespaceScopeControllerOptions extends NamespaceScopeOptions {
     /** Calls the host directly instead of dispatching the events. */
     adapter?: NamespaceScopeHostAdapter;
     /** Called instead of dispatching `antrea-session-expired` from `target`, for a page that has
@@ -89,7 +96,7 @@ export interface NamespaceScopeHandle {
      * URL and reports the choice. */
     select(scope: NamespaceScope, typed?: boolean): void;
     /** Replaces the permissions the cluster-wide verdict is about. */
-    setResources(resources: ResourceQuery[] | undefined): void;
+    setResources(resources: NamespaceScopeResources | undefined): void;
     /** Loads what the picker offers again, if it has not loaded. */
     refreshAccess(): void;
     /** Stops listening and drops pending work. Call it when the page goes away. */
@@ -108,10 +115,21 @@ function isUnauthorized(err: unknown): boolean {
     return err instanceof APIError && err.code === 401;
 }
 
+function queriesOf(resources: NamespaceScopeResources): ResourceQuery[] {
+    return Array.isArray(resources) ? resources : resources.anyOf;
+}
+
+// Equivalent permissions from a fresh render must not clear the scope or restart its requests.
+function resourcesKey(resources: NamespaceScopeResources | undefined): string | undefined {
+    return resources === undefined ? undefined : JSON.stringify(queriesOf(resources)
+        .map(q => JSON.stringify([q.group, q.resource, q.verb, q.name])).sort());
+}
+
 /** Creates the scope controller of one page. */
-export function createNamespaceScope(options: NamespaceScopeOptions): NamespaceScopeHandle {
+export function createNamespaceScope(options: NamespaceScopeControllerOptions): NamespaceScopeHandle {
     const { target, adapter } = options;
     let resources = options.resources;
+    let resourceKey = resourcesKey(resources);
     let disposed = false;
     let started = false;
     let followPopState = false;
@@ -152,7 +170,7 @@ export function createNamespaceScope(options: NamespaceScopeOptions): NamespaceS
     }
 
     function clusterWide(s: AccessSummary | null): Verdict {
-        if (resources) return pageVerdict(s, resources);
+        if (resources) return pageVerdict(s, queriesOf(resources));
         return s?.clusterAdmin ? 'allowed' : 'unknown';
     }
 
@@ -281,7 +299,7 @@ export function createNamespaceScope(options: NamespaceScopeOptions): NamespaceS
             if (disposed) return;
             const v = scopeToValue(scope);
             // A typed value is a name even when it is SCOPE_ALL, which is not a valid one.
-            if ((typed || v !== SCOPE_ALL) && !isValidNamespaceName(v)) {
+            if ((typed || scope.kind === 'namespace') && !isValidNamespaceName(v)) {
                 error = `"${v}" is not a valid namespace name.`;
                 notify();
                 return;
@@ -299,11 +317,18 @@ export function createNamespaceScope(options: NamespaceScopeOptions): NamespaceS
             if (changed) void refreshNote();
         },
         setResources(next) {
+            const nextKey = resourcesKey(next);
+            if (disposed || nextKey === resourceKey) return;
             resources = next;
-            if (!summaryLoaded || disposed) return;
+            resourceKey = nextKey;
+            // A default belongs to the old permissions. Clear it before any subscriber can
+            // request the new resource or verb, while keeping an explicit URL/picker choice.
+            access = null;
+            if (started) applyFromURL(appliedSearch);
+            if (!summaryLoaded) return;
             const generation = ++accessGeneration;
             void namespaceAccess(summary, clusterWide).then(result => {
-                if (disposed || generation !== accessGeneration) return;
+                if (disposed || generation !== accessGeneration || options.isActive?.() === false) return;
                 access = result;
                 applyFromURL(appliedSearch);
             });

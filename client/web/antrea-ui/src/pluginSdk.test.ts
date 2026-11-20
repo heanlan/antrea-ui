@@ -46,4 +46,8 @@ describe('namespaceScope', () => {
         expect(() => namespaceScope()).toThrow(/does not provide namespaceScope/);
         expect(namespaceScopeSupported()).toBe(false);
     });
+
+    test.each(['__cluster_wide__', '_all'])('rejects an invalid Namespace name %s in a link', namespace => {
+        expect(() => namespaceScope().search({ kind: 'namespace', namespace })).toThrow(/not a valid namespace name/);
+    });
 });

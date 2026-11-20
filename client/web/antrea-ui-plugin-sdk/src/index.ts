@@ -35,7 +35,7 @@ export type { EdgeSelection, EdgeExtraRenderer, FlowEntry, FlowTableColumn, Flow
 export type {
     AccessSummary, NamespaceAccessSummary, ResourceQuery, Verdict, PluginAccessRequirement,
     PluginResourceRequirement, PluginHostAccess, NamespaceScope, NamespaceScopeState, NamespaceScopeOptions,
-    NamespaceScopeHandle, NamespaceAccess, ScopeNote, ScopeSelectDetail, PluginNamespaceScope,
+    NamespaceScopeHandle, NamespaceScopeResources, NamespaceAccess, ScopeNote, ScopeSelectDetail, PluginNamespaceScope,
 } from '@antrea/ui-components';
 import type {
     AntreaNamespaceScope, EdgeExtraRenderer, FlowTableColumnsProcessor, PluginAccessRequirement,

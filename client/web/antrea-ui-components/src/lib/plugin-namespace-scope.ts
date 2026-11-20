@@ -16,6 +16,7 @@ import { createNamespaceScope } from './namespace-scope-controller.js';
 import type { NamespaceScopeHandle, NamespaceScopeHostAdapter, NamespaceScopeOptions } from './namespace-scope-controller.js';
 import { searchWithScope, scopeToValue } from './namespace-scope.js';
 import type { NamespaceScope } from './namespace-scope.js';
+import { isValidNamespaceName } from './namespace-access.js';
 
 /** The Namespace scope API a host exposes to plugin code as window.__antreaPluginHost.namespaceScope.
  * It runs the host's copy of the scope rules, so that a plugin keeps no Namespace list of its
@@ -23,7 +24,7 @@ import type { NamespaceScope } from './namespace-scope.js';
 export interface PluginNamespaceScope {
     create(options: NamespaceScopeOptions): NamespaceScopeHandle;
     /** The query string that carries `scope` to another Namespace-aware page, for links: '' for
-     * none or All Namespaces' `?namespace=_all`. */
+     * none or All Namespaces' `?namespace=_all`. Throws for an invalid Namespace name. */
     search(scope: NamespaceScope | null): string;
 }
 
@@ -33,7 +34,12 @@ export interface PluginNamespaceScope {
  * on the plugin element (the React host's) already handles. */
 export function createPluginNamespaceScope(adapter?: NamespaceScopeHostAdapter): PluginNamespaceScope {
     return {
-        create: options => createNamespaceScope({ adapter, ...options }),
-        search: scope => searchWithScope('', scopeToValue(scope)),
+        create: ({ target, resources }) => createNamespaceScope({ target, resources, adapter }),
+        search: scope => {
+            if (scope?.kind === 'namespace' && !isValidNamespaceName(scope.namespace)) {
+                throw new Error(`"${scope.namespace}" is not a valid namespace name.`);
+            }
+            return searchWithScope('', scopeToValue(scope));
+        },
     };
 }

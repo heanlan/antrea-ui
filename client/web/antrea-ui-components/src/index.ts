@@ -103,7 +103,8 @@ export type { ScopeSelectDetail } from './antrea-namespace-picker.js';
 export type { NamespaceScope } from './lib/namespace-scope.js';
 export { createNamespaceScope } from './lib/namespace-scope-controller.js';
 export type {
-    NamespaceScopeState, NamespaceScopeOptions, NamespaceScopeHandle, NamespaceScopeHostAdapter,
+    NamespaceScopeState, NamespaceScopeOptions, NamespaceScopeResources, NamespaceScopeControllerOptions,
+    NamespaceScopeHandle, NamespaceScopeHostAdapter,
 } from './lib/namespace-scope-controller.js';
 export type { PluginNamespaceScope } from './lib/plugin-namespace-scope.js';
 export { createPluginNamespaceScope } from './lib/plugin-namespace-scope.js';

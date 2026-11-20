@@ -14,8 +14,7 @@
 
 import { LitElement, css, html, nothing } from 'lit';
 import { property, state } from 'lit/decorators.js';
-import type { ResourceQuery } from './lib/access-api.js';
-import type { NamespaceScopeHandle, NamespaceScopeState } from './lib/namespace-scope-controller.js';
+import type { NamespaceScopeHandle, NamespaceScopeResources, NamespaceScopeState } from './lib/namespace-scope-controller.js';
 import { createPluginNamespaceScope } from './lib/plugin-namespace-scope.js';
 import type { PluginNamespaceScope } from './lib/plugin-namespace-scope.js';
 import { scopeToValue, valueToScope } from './lib/namespace-scope.js';
@@ -45,7 +44,7 @@ export class AntreaNamespaceScope extends LitElement {
     /** The `locationSearch` the host set on the plugin element. Absent: window.location.search. */
     @property({ attribute: false }) locationSearch?: string;
     /** The page's permissions, any-of, as in `requires.resources`. */
-    @property({ attribute: false }) resources?: ResourceQuery[];
+    @property({ attribute: false }) resources?: NamespaceScopeResources;
     @property() label = 'Namespace';
     @property() inputId = 'namespace-scope-picker';
 
@@ -53,7 +52,7 @@ export class AntreaNamespaceScope extends LitElement {
     private _handle?: NamespaceScopeHandle;
     private _unsubscribe?: () => void;
     // The resources the handle was last given.
-    private _resources?: ResourceQuery[];
+    private _resources?: NamespaceScopeResources;
 
     /** The current state, or null before the element has connected. */
     get scope(): NamespaceScopeState | null {
@@ -84,12 +83,13 @@ export class AntreaNamespaceScope extends LitElement {
     override willUpdate(changed: Map<string, unknown>) {
         super.willUpdate(changed);
         if (!this._handle) return;
-        // The handle ignores a location it already has.
-        if (changed.has('locationSearch')) this._handle.setLocationSearch(this.locationSearch);
+        // Invalidate the old verdict before a new URL can choose a default from it.
         if (changed.has('resources') && this.resources !== this._resources) {
             this._resources = this.resources;
             this._handle.setResources(this.resources);
         }
+        // The handle ignores a location it already has.
+        if (changed.has('locationSearch')) this._handle.setLocationSearch(this.locationSearch);
     }
 
     private _onState(s: NamespaceScopeState) {

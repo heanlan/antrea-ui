@@ -54,8 +54,12 @@ describe('antrea-namespace-scope', () => {
         await el.updateComplete;
         const picker = el.shadowRoot!.querySelector('antrea-namespace-picker');
         expect(picker).not.toBeNull();
-        // jsdom has no constructable stylesheets, so Lit falls back to <style> elements.
-        const css = Array.from(el.shadowRoot!.querySelectorAll('style')).map(st => st.textContent).join('\n');
+        // Lit uses adopted stylesheets when supported and <style> elements otherwise.
+        const root = el.shadowRoot!;
+        const css = [
+            ...Array.from(root.adoptedStyleSheets ?? []).flatMap(sheet => Array.from(sheet.cssRules, rule => rule.cssText)),
+            ...Array.from(root.querySelectorAll('style'), style => style.textContent),
+        ].join('\n');
         expect(css).toContain('.combobox-list');
         expect(css).toContain('.field-input');
     });
@@ -65,6 +69,29 @@ describe('antrea-namespace-scope', () => {
         await vi.waitFor(() => expect(el.scope?.access?.candidates).toEqual(['ns-a', 'ns-b']));
         await el.updateComplete;
         expect(el.scope?.scope).toEqual({ kind: 'namespace', namespace: 'ns-a' });
+    });
+
+    it('accepts the anyOf resource form used by a Namespace-aware route', async () => {
+        const { el } = mount({ locationSearch: '', resources: { anyOf: [{ group: '', resource: 'pods', verb: 'list' }] } });
+        await vi.waitFor(() => expect(el.scope?.access).not.toBeNull());
+        expect(el.scope?.access?.clusterWide).toBe('denied');
+        expect(el.scope?.offerAll).toBe(false);
+    });
+
+    it('does not apply the old default when resources and location change together', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({
+            ...summary,
+            rules: { resourceRules: [{ verbs: ['list'], apiGroups: [''], resources: ['pods'] }], nonResourceRules: [], incomplete: false },
+        }), { status: 200 }))));
+        const { el } = mount({ locationSearch: '?namespace=ns-b', resources: [{ group: '', resource: 'pods', verb: 'list' }] });
+        await vi.waitFor(() => expect(el.scope?.access?.clusterWide).toBe('allowed'));
+        const scopes: unknown[] = [];
+        el.addEventListener(NAMESPACE_SCOPE_STATE_EVENT, e => scopes.push((e as CustomEvent<NamespaceScopeState>).detail.scope));
+        el.locationSearch = '';
+        el.resources = [{ group: '', resource: 'services', verb: 'list' }];
+        await vi.waitFor(() => expect(el.scope?.access?.clusterWide).toBe('denied'));
+        expect(el.scope?.scope).toEqual({ kind: 'namespace', namespace: 'ns-a' });
+        expect(scopes).not.toContainEqual({ kind: 'all' });
     });
 
     it('lets the host events cross the plugin shadow root, and keeps the state event inside', async () => {
